@@ -115,8 +115,6 @@ let singleShieldCharges = 0;
 const game = new Phaser.Game(config);
 
 function preload() {
-    this.load.image('potato', 'https://i.imgur.com/6QKQ4Qp.png');
-    this.load.image('hand', 'https://i.imgur.com/1Q9Z1Zm.png');
     this.load.image('avatar_bryle', 'assets/images/bryle.png');
     this.load.image('avatar_prince', 'assets/images/Prince.png');
     this.load.image('avatar_josh', 'assets/images/josh.png');
@@ -125,6 +123,7 @@ function preload() {
 }
 
 function create() {
+    ensureCoreTextures(this);
     createAnimatedBackground(this);
     const leaderboard = getLeaderboard();
     bestScore = leaderboard.length > 0 ? leaderboard[0].score : 0;
@@ -150,6 +149,36 @@ function create() {
     });
 
     showIntro(this);
+}
+
+function ensureCoreTextures(scene) {
+    if (scene.textures.exists('potato')) scene.textures.remove('potato');
+    if (scene.textures.exists('hand')) scene.textures.remove('hand');
+
+    const potatoG = scene.make.graphics({ x: 0, y: 0, add: false });
+    potatoG.fillStyle(0x8d6e63, 1);
+    potatoG.fillEllipse(64, 64, 90, 70);
+    potatoG.lineStyle(3, 0xd7ccc8, 0.9);
+    potatoG.strokeEllipse(64, 64, 90, 70);
+    potatoG.fillStyle(0x5d4037, 0.7);
+    potatoG.fillEllipse(52, 52, 16, 10);
+    potatoG.fillEllipse(78, 70, 14, 9);
+    potatoG.fillEllipse(64, 80, 12, 8);
+    potatoG.generateTexture('potato', 128, 128);
+    potatoG.destroy();
+
+    const handG = scene.make.graphics({ x: 0, y: 0, add: false });
+    handG.fillStyle(0xffe0b2, 1);
+    handG.fillRoundedRect(16, 44, 96, 56, 20);
+    handG.fillRoundedRect(20, 20, 16, 36, 10);
+    handG.fillRoundedRect(38, 14, 16, 42, 10);
+    handG.fillRoundedRect(56, 10, 16, 46, 10);
+    handG.fillRoundedRect(74, 16, 16, 40, 10);
+    handG.fillRoundedRect(92, 24, 16, 30, 10);
+    handG.lineStyle(2, 0xffcc80, 0.8);
+    handG.strokeRoundedRect(16, 44, 96, 56, 20);
+    handG.generateTexture('hand', 128, 128);
+    handG.destroy();
 }
 
 function update(time, delta) {
