@@ -4,6 +4,8 @@ const LEFT_X = 120;
 const RIGHT_X = 360;
 const HAND_Y = 510;
 const POTATO_Y_OFFSET = 60;
+const POTATO_INTRO_SIZE = 120;
+const POTATO_GAME_SIZE = 56;
 const BASE_HAND_SCALE = 0.44;
 const BASE_CATCH_WIDTH = 170;
 const BASE_CATCH_HEIGHT = 56;
@@ -19,6 +21,14 @@ const DUAL_POWER_TYPES = {
     SHRINK: 'shrink',
     HEAVY: 'heavy',
     STUN: 'stun',
+    LASER: 'laser'
+};
+const SINGLE_POWER_TYPES = {
+    FREEZE: 'freeze',
+    DOUBLE: 'double',
+    BIGBOX: 'bigbox',
+    SHRINK_UP: 'shrink_up',
+    SHIELD: 'shield',
     LASER: 'laser'
 };
 
@@ -97,6 +107,10 @@ let dualPowerUpGroup;
 let dualPowerSpawnEvent;
 let dualPowerNoticeText;
 let dualLastPowerType = null;
+let singlePowerUpGroup;
+let singlePowerSpawnEvent;
+let singleLastPowerType = null;
+let singleShieldCharges = 0;
 
 const game = new Phaser.Game(config);
 
@@ -141,6 +155,7 @@ function create() {
 function update(time, delta) {
     if (gameState === 'playing') {
         updateCatchZoneSizeForScore(this);
+        updateSinglePowerUps(this, delta);
         if (singleTimerEnabled && timerText) {
             const remainingSec = Math.max(0, Math.ceil((singleTimerSeconds * 1000 - (this.time.now - runStartMs)) / 1000));
             timerText.setText(`Time: ${remainingSec}s`);
@@ -233,7 +248,7 @@ function showIntro(scene) {
         lineSpacing: 8
     }).setOrigin(0.5);
 
-    const mascot = scene.add.image(GAME_WIDTH / 2, 360, 'potato').setScale(0.28);
+    const mascot = scene.add.image(GAME_WIDTH / 2, 360, 'potato').setDisplaySize(POTATO_INTRO_SIZE, POTATO_INTRO_SIZE);
     scene.tweens.add({
         targets: [title, mascot],
         y: '-=12',
@@ -567,6 +582,8 @@ function startActualGame(scene) {
 
     gameState = 'playing';
     runStartMs = scene.time.now;
+    singleLastPowerType = null;
+    singleShieldCharges = 0;
     score = 0;
     catchCount = 0;
     canSwitch = true;
@@ -577,6 +594,8 @@ function startActualGame(scene) {
     scene.physics.world.setBoundsCollision(true, true, false, false);
 
     gameplayGroup = scene.add.group();
+    ensureSinglePowerIconTextures(scene);
+    singlePowerUpGroup = scene.add.group();
 
     leftHand = scene.physics.add.staticImage(LEFT_X, HAND_Y, 'hand').setScale(BASE_HAND_SCALE);
     rightHand = scene.physics.add.staticImage(RIGHT_X, HAND_Y, 'hand').setScale(BASE_HAND_SCALE);
@@ -595,7 +614,7 @@ function startActualGame(scene) {
     rightCatchZone.body.setAllowGravity(false);
     rightCatchZone.body.setImmovable(true);
 
-    potato = scene.physics.add.image(leftHand.x, leftHand.y - POTATO_Y_OFFSET, 'potato').setScale(0.2);
+    potato = scene.physics.add.image(leftHand.x, leftHand.y - POTATO_Y_OFFSET, 'potato').setDisplaySize(POTATO_GAME_SIZE, POTATO_GAME_SIZE);
     potato.setCollideWorldBounds(true);
     potato.setBounce(0.85, 0.05);
     potato.setAngularDrag(80);
@@ -649,6 +668,7 @@ function startActualGame(scene) {
     if (daddyCheerText) gameplayGroup.add(daddyCheerText);
 
     currentHand = leftHand;
+    scheduleNextSinglePowerUp(scene);
 }
 
 function switchHand(scene) {
@@ -692,7 +712,6 @@ function onCatch(scene, hand) {
     popHand(hand, scene);
     burstSparkles(scene, hand.x, hand.y - 48);
     playSfx('catch');
-    maybeTriggerPowerUp(scene);
     if (selectedPlayer === 'Daddy') {
         showDaddyCheer(scene, hand.x, hand.y - 90);
         burstSparkles(scene, hand.x, hand.y - 90, 18);
@@ -701,6 +720,23 @@ function onCatch(scene, hand) {
 
 function loseLife(scene) {
     if (gameState !== 'playing') return;
+    if (singleShieldCharges > 0 && potato && currentHand) {
+        singleShieldCharges -= 1;
+        potatoInFlight = false;
+        canSwitch = true;
+        potato.setVelocity(0);
+        potato.setAngularVelocity(0);
+        potato.setPosition(currentHand.x, currentHand.y - POTATO_Y_OFFSET);
+        burstSparkles(scene, potato.x, potato.y, 14);
+        if (powerUpText) {
+            powerUpText.setText(`Shield saved you! (${singleShieldCharges})`);
+            powerUpText.setAlpha(1);
+            scene.tweens.killTweensOf(powerUpText);
+            scene.tweens.add({ targets: powerUpText, alpha: 0, duration: 900, delay: 400 });
+        }
+        playSfx('power');
+        return;
+    }
 
     scene.cameras.main.shake(220, 0.007);
     playSfx('miss');
@@ -711,6 +747,14 @@ function finishGame(scene) {
     gameState = 'gameover';
     canSwitch = false;
     potatoInFlight = false;
+    if (singlePowerSpawnEvent) {
+        singlePowerSpawnEvent.remove(false);
+        singlePowerSpawnEvent = null;
+    }
+    if (singlePowerUpGroup) {
+        singlePowerUpGroup.clear(true, true);
+        singlePowerUpGroup = null;
+    }
 
     if (potato) {
         potato.setVelocity(0);
@@ -1000,7 +1044,7 @@ function createDualLanePlayer(scene, label, handsY, accentColor) {
     player.rightZone.body.setAllowGravity(false);
     player.rightZone.body.setImmovable(true);
 
-    player.potato = scene.physics.add.image(LEFT_X, handsY - POTATO_Y_OFFSET, 'potato').setScale(0.2);
+    player.potato = scene.physics.add.image(LEFT_X, handsY - POTATO_Y_OFFSET, 'potato').setDisplaySize(POTATO_GAME_SIZE, POTATO_GAME_SIZE);
     player.potato.setCollideWorldBounds(true);
     player.potato.body.setBoundsRectangle(new Phaser.Geom.Rectangle(0, laneTop, GAME_WIDTH, laneBottom - laneTop));
     player.potato.setBounce(0.85, 0.05);
@@ -1655,6 +1699,16 @@ function endDualSeries(scene, winner, loser) {
 }
 
 function cleanupGame(scene) {
+    if (singlePowerSpawnEvent) {
+        singlePowerSpawnEvent.remove(false);
+        singlePowerSpawnEvent = null;
+    }
+    if (singlePowerUpGroup) {
+        singlePowerUpGroup.clear(true, true);
+        singlePowerUpGroup = null;
+    }
+    singleShieldCharges = 0;
+
     if (leftCollider) {
         leftCollider.destroy();
         leftCollider = null;
@@ -1965,11 +2019,183 @@ function updateCatchZoneSizeForScore(scene) {
     rightCatchZone.setFillStyle(0xffffff, alpha);
 }
 
-function maybeTriggerPowerUp(scene) {
-    if (activePowerUp || catchCount === 0 || catchCount % 7 !== 0) return;
-    const types = ['freeze', 'bigbox', 'double'];
-    const type = types[Phaser.Math.Between(0, types.length - 1)];
-    activatePowerUp(scene, type);
+function scheduleNextSinglePowerUp(scene) {
+    if (gameState !== 'playing' || !singlePowerUpGroup) return;
+    if (singlePowerSpawnEvent) {
+        singlePowerSpawnEvent.remove(false);
+        singlePowerSpawnEvent = null;
+    }
+    singlePowerSpawnEvent = scene.time.delayedCall(Phaser.Math.Between(6000, 10000), () => {
+        spawnSinglePowerUp(scene);
+        scheduleNextSinglePowerUp(scene);
+    });
+}
+
+function spawnSinglePowerUp(scene) {
+    if (gameState !== 'playing' || !singlePowerUpGroup) return;
+    const type = pickSinglePowerType();
+    const spec = getSinglePowerSpec(type);
+    if (!spec) return;
+
+    const item = scene.add.image(Phaser.Math.Between(30, GAME_WIDTH - 30), -20, spec.texture);
+    item.setDisplaySize(30, 30);
+    item.setData('fallSpeed', Phaser.Math.Between(160, 210));
+    item.setData('type', type);
+    item.setData('spawnMs', scene.time.now);
+    item.setData('collected', false);
+    singlePowerUpGroup.add(item);
+    if (gameplayGroup) gameplayGroup.add(item);
+}
+
+function updateSinglePowerUps(scene, delta) {
+    if (gameState !== 'playing' || !singlePowerUpGroup || !potato?.active) return;
+    singlePowerUpGroup.getChildren().forEach((item) => {
+        if (!item?.active) return;
+        const speed = item.getData('fallSpeed') || 180;
+        item.y += speed * (delta / 1000);
+
+        const tooOld = scene.time.now - (item.getData('spawnMs') || scene.time.now) > 7000;
+        if (item.y > GAME_HEIGHT + 30 || tooOld) {
+            item.destroy();
+            return;
+        }
+
+        if (item.getData('collected')) return;
+        if (Phaser.Geom.Intersects.RectangleToRectangle(item.getBounds(), potato.getBounds())) {
+            item.setData('collected', true);
+            const type = item.getData('type');
+            item.destroy();
+            showSinglePowerPickupPopup(scene, type);
+            applySinglePowerEffect(scene, type);
+        }
+    });
+}
+
+function pickSinglePowerType() {
+    const roll = Phaser.Math.FloatBetween(0, 1);
+    let type;
+    if (roll < 0.68) {
+        const boosts = [
+            SINGLE_POWER_TYPES.FREEZE,
+            SINGLE_POWER_TYPES.DOUBLE,
+            SINGLE_POWER_TYPES.SHIELD,
+            SINGLE_POWER_TYPES.BIGBOX,
+            SINGLE_POWER_TYPES.SHRINK_UP
+        ];
+        type = boosts[Phaser.Math.Between(0, boosts.length - 1)];
+    } else {
+        type = SINGLE_POWER_TYPES.LASER;
+    }
+
+    if (type === singleLastPowerType) {
+        type = type === SINGLE_POWER_TYPES.LASER ? SINGLE_POWER_TYPES.SHIELD : SINGLE_POWER_TYPES.LASER;
+    }
+    singleLastPowerType = type;
+    return type;
+}
+
+function applySinglePowerEffect(scene, type) {
+    if (type === SINGLE_POWER_TYPES.FREEZE || type === SINGLE_POWER_TYPES.DOUBLE || type === SINGLE_POWER_TYPES.BIGBOX) {
+        activatePowerUp(scene, type);
+        return;
+    }
+    if (type === SINGLE_POWER_TYPES.SHRINK_UP) {
+        activatePowerUp(scene, 'bigbox');
+        if (powerUpText) powerUpText.setText('Power-Up: Shrink Up!');
+        return;
+    }
+    if (type === SINGLE_POWER_TYPES.SHIELD) {
+        singleShieldCharges = Math.min(3, singleShieldCharges + 1);
+        if (powerUpText) {
+            powerUpText.setText(`Power-Up: Shield x${singleShieldCharges}`);
+            powerUpText.setAlpha(1);
+            scene.tweens.killTweensOf(powerUpText);
+            scene.tweens.add({ targets: powerUpText, alpha: 0, duration: 900, delay: 900 });
+        }
+        playSfx('power');
+        return;
+    }
+
+    // Trap power-up
+    if (potato?.body) {
+        potato.setVelocityY(Math.max(potato.body.velocity.y, 500));
+    }
+    scene.cameras.main.shake(120, 0.004);
+    if (powerUpText) {
+        powerUpText.setText('Trap: Laser Hit!');
+        powerUpText.setAlpha(1);
+        scene.tweens.killTweensOf(powerUpText);
+        scene.tweens.add({ targets: powerUpText, alpha: 0, duration: 900, delay: 700 });
+    }
+    playSfx('miss');
+}
+
+function getSinglePowerSpec(type) {
+    if (type === SINGLE_POWER_TYPES.FREEZE) return { texture: 'sp_freeze' };
+    if (type === SINGLE_POWER_TYPES.DOUBLE) return { texture: 'sp_double' };
+    if (type === SINGLE_POWER_TYPES.BIGBOX) return { texture: 'pup_bigbox' };
+    if (type === SINGLE_POWER_TYPES.SHRINK_UP) return { texture: 'pup_shrinkup' };
+    if (type === SINGLE_POWER_TYPES.SHIELD) return { texture: 'pup_shield' };
+    if (type === SINGLE_POWER_TYPES.LASER) return { texture: 'pup_laser' };
+    return null;
+}
+
+function getSinglePowerLabel(type) {
+    if (type === SINGLE_POWER_TYPES.FREEZE) return 'Freeze';
+    if (type === SINGLE_POWER_TYPES.DOUBLE) return 'Double';
+    if (type === SINGLE_POWER_TYPES.BIGBOX) return 'Big Box';
+    if (type === SINGLE_POWER_TYPES.SHRINK_UP) return 'Shrink Up';
+    if (type === SINGLE_POWER_TYPES.SHIELD) return 'Shield';
+    if (type === SINGLE_POWER_TYPES.LASER) return 'Laser Trap';
+    return 'Power-Up';
+}
+
+function showSinglePowerPickupPopup(scene, type) {
+    if (!potato?.active) return;
+    const popup = scene.add.text(potato.x, potato.y - 30, getSinglePowerLabel(type), {
+        fontSize: '18px',
+        fill: '#fffde7',
+        fontFamily: 'Trebuchet MS',
+        fontStyle: 'bold',
+        stroke: '#1b5e20',
+        strokeThickness: 4
+    }).setOrigin(0.5);
+    if (gameplayGroup) gameplayGroup.add(popup);
+    scene.tweens.add({
+        targets: popup,
+        y: popup.y - 22,
+        alpha: 0,
+        duration: 1000,
+        onComplete: () => popup.destroy()
+    });
+}
+
+function ensureSinglePowerIconTextures(scene) {
+    ensureDualPowerIconTextures(scene);
+    if (!scene.textures.exists('sp_freeze')) {
+        const g = scene.make.graphics({ x: 0, y: 0, add: false });
+        g.fillStyle(0x29b6f6, 1);
+        g.fillCircle(16, 16, 15);
+        g.lineStyle(2, 0xffffff, 0.95);
+        g.strokeCircle(16, 16, 14);
+        g.lineStyle(3, 0xffffff, 1);
+        g.lineBetween(9, 16, 23, 16);
+        g.lineBetween(16, 9, 16, 23);
+        g.generateTexture('sp_freeze', 32, 32);
+        g.destroy();
+    }
+    if (!scene.textures.exists('sp_double')) {
+        const g = scene.make.graphics({ x: 0, y: 0, add: false });
+        g.fillStyle(0xff7043, 1);
+        g.fillCircle(16, 16, 15);
+        g.lineStyle(2, 0xffffff, 0.95);
+        g.strokeCircle(16, 16, 14);
+        g.fillStyle(0xffffff, 1);
+        g.fillRect(9, 11, 14, 4);
+        g.fillRect(9, 17, 14, 4);
+        g.generateTexture('sp_double', 32, 32);
+        g.destroy();
+    }
 }
 
 function activatePowerUp(scene, type) {
