@@ -1,4 +1,4 @@
-# BryleeTato
+# TabandaTato
 
 A simple web game for kids: transfer the potato between two hands without letting it fall! Made with Phaser 3.
 
@@ -16,3 +16,4 @@ A simple web game for kids: transfer the potato between two hands without lettin
 ---
 
 _All graphics are placeholders. Replace with your own for a custom look!_
+
