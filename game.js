@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 const SINGLE_GAME_WIDTH = 640;
 const DUAL_GAME_WIDTH = 1100;
 let GAME_WIDTH = SINGLE_GAME_WIDTH;
@@ -3255,3 +3256,4 @@ function burstSparkles(scene, x, y, pieces = 12) {
         });
     }
 }
+
