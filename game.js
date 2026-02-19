@@ -7,9 +7,20 @@ const POTATO_Y_OFFSET = 60;
 const BASE_HAND_SCALE = 0.44;
 const BASE_CATCH_WIDTH = 170;
 const BASE_CATCH_HEIGHT = 56;
-const MIN_CATCH_WIDTH = 72;
-const MIN_CATCH_HEIGHT = 30;
-const CATCH_SHRINK_PER_SCORE = 2.8;
+const MIN_CATCH_WIDTH = 24;
+const MIN_CATCH_HEIGHT = 10;
+const CATCH_SHRINK_PER_SCORE = 5.1;
+const CATCH_SHRINK_PER_SECOND = 3.1;
+const TIMER_OPTIONS = [10, 30, 60];
+const DUAL_POWER_TYPES = {
+    SHIELD: 'shield',
+    BIGBOX: 'bigbox',
+    SHRINK_UP: 'shrink_up',
+    SHRINK: 'shrink',
+    HEAVY: 'heavy',
+    STUN: 'stun',
+    LASER: 'laser'
+};
 
 const config = {
     type: Phaser.AUTO,
@@ -52,6 +63,10 @@ let powerUpTimer = null;
 let powerUpText;
 let soundEnabled = true;
 let audioContext;
+let singleTimerEnabled = true;
+let dualTimerEnabled = true;
+let singleTimerSeconds = 30;
+let dualTimerSeconds = 30;
 
 let introGroup;
 let modeSelectGroup;
@@ -69,11 +84,19 @@ let bgGroup;
 let scoreText;
 let bestText;
 let playerText;
+let timerText;
+let dualTimerText;
 let welcomeText;
 let daddyCheerText;
 let soundToggleText;
 let dualMatch;
 let dualPlayerNames = { mouse: null, keyboard: null };
+let runStartMs = 0;
+let dualRunStartMs = 0;
+let dualPowerUpGroup;
+let dualPowerSpawnEvent;
+let dualPowerNoticeText;
+let dualLastPowerType = null;
 
 const game = new Phaser.Game(config);
 
@@ -92,6 +115,10 @@ function create() {
     const leaderboard = getLeaderboard();
     bestScore = leaderboard.length > 0 ? leaderboard[0].score : 0;
     soundEnabled = localStorage.getItem('tabandatato_sound') !== 'off';
+    singleTimerEnabled = localStorage.getItem('tabandatato_timer_single') !== 'off';
+    dualTimerEnabled = localStorage.getItem('tabandatato_timer_dual') !== 'off';
+    singleTimerSeconds = clampTimerSeconds(parseInt(localStorage.getItem('tabandatato_timer_single_seconds'), 10) || 30);
+    dualTimerSeconds = clampTimerSeconds(parseInt(localStorage.getItem('tabandatato_timer_dual_seconds'), 10) || 30);
 
     this.input.on('pointerdown', (pointer, gameObjects) => {
         if (gameObjects.length > 0) return;
@@ -111,12 +138,31 @@ function create() {
     showIntro(this);
 }
 
-function update() {
+function update(time, delta) {
+    if (gameState === 'playing') {
+        updateCatchZoneSizeForScore(this);
+        if (singleTimerEnabled && timerText) {
+            const remainingSec = Math.max(0, Math.ceil((singleTimerSeconds * 1000 - (this.time.now - runStartMs)) / 1000));
+            timerText.setText(`Time: ${remainingSec}s`);
+            if (remainingSec <= 0) {
+                finishGame(this);
+                return;
+            }
+        }
+    }
+    if (gameState === 'dual' && dualTimerEnabled && dualTimerText) {
+        const remainingSec = Math.max(0, Math.ceil((dualTimerSeconds * 1000 - (this.time.now - dualRunStartMs)) / 1000));
+        dualTimerText.setText(`Time: ${remainingSec}s`);
+        if (remainingSec <= 0) {
+            finishDualRoundByTimer(this);
+            return;
+        }
+    }
     if (gameState === 'playing' && potato && potato.y > GAME_HEIGHT + 20) {
         loseLife(this);
     }
     if (gameState === 'dual') {
-        updateDual(this);
+        updateDual(this, delta);
     }
 }
 
@@ -241,9 +287,59 @@ function showModeSelect(scene) {
 
     const onePlayerBtn = createButton(scene, GAME_WIDTH / 2, 300, 'One Player', '#2e7d32', () => showPlayerSelect(scene), 280, 34);
     const twoPlayerBtn = createButton(scene, GAME_WIDTH / 2, 390, 'Two Players', '#00838f', () => startDualSetup(scene), 280, 34);
+    const onePlayerTimerToggle = createToggleButton(
+        scene,
+        GAME_WIDTH / 2 - 100,
+        455,
+        `1P Timer: ${singleTimerEnabled ? 'ON' : 'OFF'}`,
+        '#6d4c41',
+        () => toggleSingleTimer(onePlayerTimerToggle),
+        200,
+        20
+    );
+    const onePlayerTimerOption = createToggleButton(
+        scene,
+        GAME_WIDTH / 2 + 112,
+        455,
+        `1P: ${singleTimerSeconds}s`,
+        '#5d4037',
+        () => cycleSingleTimerSeconds(onePlayerTimerOption),
+        160,
+        20
+    );
+    const twoPlayerTimerToggle = createToggleButton(
+        scene,
+        GAME_WIDTH / 2 - 100,
+        495,
+        `2P Timer: ${dualTimerEnabled ? 'ON' : 'OFF'}`,
+        '#455a64',
+        () => toggleDualTimer(twoPlayerTimerToggle),
+        200,
+        20
+    );
+    const twoPlayerTimerOption = createToggleButton(
+        scene,
+        GAME_WIDTH / 2 + 112,
+        495,
+        `2P: ${dualTimerSeconds}s`,
+        '#37474f',
+        () => cycleDualTimerSeconds(twoPlayerTimerOption),
+        160,
+        20
+    );
     const backBtn = createButton(scene, GAME_WIDTH / 2, 510, 'Back', '#546e7a', () => showIntro(scene), 180, 26);
 
-    modeSelectGroup.addMultiple([title, onePlayerBtn, twoPlayerBtn, backBtn]);
+    backBtn.setY(560);
+    modeSelectGroup.addMultiple([
+        title,
+        onePlayerBtn,
+        twoPlayerBtn,
+        onePlayerTimerToggle,
+        onePlayerTimerOption,
+        twoPlayerTimerToggle,
+        twoPlayerTimerOption,
+        backBtn
+    ]);
 }
 
 function showPlayerSelect(scene) {
@@ -470,6 +566,7 @@ function startActualGame(scene) {
     cleanupGame(scene);
 
     gameState = 'playing';
+    runStartMs = scene.time.now;
     score = 0;
     catchCount = 0;
     canSwitch = true;
@@ -508,6 +605,9 @@ function startActualGame(scene) {
 
     scoreText = scene.add.text(GAME_WIDTH / 2, 16, 'Score: 0', makeHudStyle(26, '#1b5e20')).setOrigin(0.5, 0);
     bestText = scene.add.text(GAME_WIDTH - 18, 16, `Best: ${bestScore}`, makeHudStyle(22, '#0d47a1')).setOrigin(1, 0);
+    timerText = singleTimerEnabled
+        ? scene.add.text(18, 16, `Time: ${singleTimerSeconds}s`, makeHudStyle(22, '#4e342e')).setOrigin(0, 0)
+        : null;
     playerText = scene.add.text(GAME_WIDTH / 2, 56, `Player: ${selectedPlayer}`, makeHudStyle(20, '#263238')).setOrigin(0.5, 0);
     welcomeText = null;
     daddyCheerText = null;
@@ -544,6 +644,7 @@ function startActualGame(scene) {
         leftCatchZone, rightCatchZone, leftHand, rightHand, potato,
         scoreText, bestText, playerText, gameHintText, powerUpText
     ]);
+    if (timerText) gameplayGroup.add(timerText);
     if (welcomeText) gameplayGroup.add(welcomeText);
     if (daddyCheerText) gameplayGroup.add(daddyCheerText);
 
@@ -580,7 +681,7 @@ function onCatch(scene, hand) {
     scene.physics.world.gravity.y = 560 + Math.min(score * 8, 220);
 
     scoreText.setText(`Score: ${score}`);
-    updateCatchZoneSizeForScore();
+    updateCatchZoneSizeForScore(scene);
 
     if (score > bestScore) {
         bestScore = score;
@@ -785,8 +886,21 @@ function startDualGame(scene, names = { mouse: 'Mouse', keyboard: 'Keyboard' }) 
     clearPowerUp(scene, true);
 
     gameState = 'dual';
+    dualRunStartMs = scene.time.now;
+    dualLastPowerType = null;
+    ensureDualPowerIconTextures(scene);
     dualGroup = scene.add.group();
     dualResultGroup = null;
+    dualPowerUpGroup = scene.add.group();
+    dualPowerNoticeText = scene.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 40, '', {
+        fontSize: '20px',
+        fill: '#5d4037',
+        fontFamily: 'Trebuchet MS',
+        fontStyle: 'bold',
+        align: 'center',
+        stroke: '#ffffff',
+        strokeThickness: 4
+    }).setOrigin(0.5).setAlpha(0);
 
     const divider = scene.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, 6, 0xffffff, 0.75);
     const topBg = scene.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 4, GAME_WIDTH, GAME_HEIGHT / 2, 0xffffff, 0.08);
@@ -817,21 +931,38 @@ function startDualGame(scene, names = { mouse: 'Mouse', keyboard: 'Keyboard' }) 
         strokeThickness: 4
     }).setOrigin(0.5);
     const exitBtn = createButton(scene, GAME_WIDTH - 72, 20, 'Exit', '#546e7a', () => showIntro(scene), 120, 20);
+    dualTimerText = dualTimerEnabled
+        ? scene.add.text(GAME_WIDTH / 2, 14, `Time: ${dualTimerSeconds}s`, {
+            fontSize: '20px',
+            fill: '#5d4037',
+            fontFamily: 'Trebuchet MS',
+            fontStyle: 'bold',
+            backgroundColor: '#fff8e1',
+            padding: { left: 8, right: 8, top: 3, bottom: 3 }
+        }).setOrigin(0.5, 0)
+        : null;
 
     dualMatch = {
         ended: false,
         round: 1,
         maxWins: 2,
         seriesText,
+        powerGraceUntil: scene.time.now + 5000,
         mouse: createDualLanePlayer(scene, mouseName, 250, '#00838f'),
         keyboard: createDualLanePlayer(scene, keyboardName, 565, '#6a1b9a')
     };
 
-    dualGroup.addMultiple([topBg, bottomBg, divider, mouseTitle, keyboardTitle, seriesText, exitBtn]);
+    scheduleNextDualPowerUp(scene);
+
+    dualGroup.addMultiple([topBg, bottomBg, divider, mouseTitle, keyboardTitle, seriesText, exitBtn, dualPowerNoticeText]);
+    if (dualTimerText) dualGroup.add(dualTimerText);
     updateDualSeriesHud();
 }
 
 function createDualLanePlayer(scene, label, handsY, accentColor) {
+    const isTopLane = handsY < GAME_HEIGHT / 2;
+    const laneTop = isTopLane ? 0 : Math.floor(GAME_HEIGHT / 2) + 4;
+    const laneBottom = isTopLane ? Math.floor(GAME_HEIGHT / 2) - 4 : GAME_HEIGHT;
     const player = {
         label,
         score: 0,
@@ -841,7 +972,15 @@ function createDualLanePlayer(scene, label, handsY, accentColor) {
         inFlight: false,
         currentSide: 'left',
         topLimit: Math.max(0, handsY - 170),
-        missLimit: Math.min(GAME_HEIGHT + 20, handsY + 90)
+        missLimit: laneBottom - 2,
+        shieldUntil: 0,
+        shrinkUntil: 0,
+        heavyUntil: 0,
+        stunnedUntil: 0,
+        minZoneWidth: BASE_CATCH_WIDTH,
+        minZoneHeight: BASE_CATCH_HEIGHT,
+        laneTop,
+        laneBottom
     };
 
     player.leftHand = scene.physics.add.staticImage(LEFT_X, handsY, 'hand').setScale(0.34);
@@ -863,6 +1002,7 @@ function createDualLanePlayer(scene, label, handsY, accentColor) {
 
     player.potato = scene.physics.add.image(LEFT_X, handsY - POTATO_Y_OFFSET, 'potato').setScale(0.2);
     player.potato.setCollideWorldBounds(true);
+    player.potato.body.setBoundsRectangle(new Phaser.Geom.Rectangle(0, laneTop, GAME_WIDTH, laneBottom - laneTop));
     player.potato.setBounce(0.85, 0.05);
     player.potato.setAngularDrag(80);
     player.potato.setVelocity(0);
@@ -877,6 +1017,12 @@ function createDualLanePlayer(scene, label, handsY, accentColor) {
         fontFamily: 'Trebuchet MS',
         fontStyle: 'bold'
     }).setOrigin(1, 0.5);
+    player.effectText = scene.add.text(GAME_WIDTH - 16, hudY + 24, '', {
+        fontSize: '16px',
+        fill: '#37474f',
+        fontFamily: 'Trebuchet MS',
+        fontStyle: 'bold'
+    }).setOrigin(1, 0.5);
 
     dualGroup.addMultiple([
         player.leftZone,
@@ -884,7 +1030,8 @@ function createDualLanePlayer(scene, label, handsY, accentColor) {
         player.leftHand,
         player.rightHand,
         player.potato,
-        player.scoreText
+        player.scoreText,
+        player.effectText
     ]);
 
     return player;
@@ -894,13 +1041,15 @@ function switchDualHand(scene, controlKey) {
     if (!dualMatch || dualMatch.ended) return;
     const player = controlKey === 'mouse' ? dualMatch.mouse : dualMatch.keyboard;
     if (!player || !player.canSwitch) return;
+    if (scene.time.now < player.stunnedUntil) return;
 
     player.canSwitch = false;
     player.inFlight = true;
     const targetSide = player.currentSide === 'left' ? 'right' : 'left';
     const targetX = targetSide === 'left' ? LEFT_X : RIGHT_X;
     const throwBoost = Math.min(player.score * 4, 120);
-    const throwPower = 280 + throwBoost;
+    const throwPenalty = scene.time.now < player.heavyUntil ? 90 : 0;
+    const throwPower = Math.max(170, 280 + throwBoost - throwPenalty);
 
     player.potato.setVelocityX((targetX - player.potato.x) * 2.5);
     player.potato.setVelocityY(-throwPower);
@@ -922,38 +1071,461 @@ function onDualCatch(scene, player, side) {
     player.score += 1;
     player.totalScore += 1;
     player.scoreText.setText(`${player.label}: ${player.score}`);
-    updateDualCatchZoneSize(player);
+    updateDualCatchZoneSize(scene, player);
     popText(player.scoreText, scene);
     burstSparkles(scene, side === 'left' ? LEFT_X : RIGHT_X, player.leftHand.y - 48, 10);
     playSfx('catch');
 }
 
-function updateDual(scene) {
+function updateDual(scene, delta = 16) {
     if (!dualMatch || dualMatch.ended) return;
 
-    const mouseMissed = dualMatch.mouse.potato.y > dualMatch.mouse.missLimit;
-    const keyboardMissed = dualMatch.keyboard.potato.y > dualMatch.keyboard.missLimit;
+    enforceDualLaneBounds(dualMatch.mouse);
+    enforceDualLaneBounds(dualMatch.keyboard);
+    updateDualPlayerEffects(scene, dualMatch.mouse);
+    updateDualPlayerEffects(scene, dualMatch.keyboard);
+    updateDualPowerUps(scene, delta);
+
+    const mouseMissed = hasDualPlayerMissed(dualMatch.mouse);
+    const keyboardMissed = hasDualPlayerMissed(dualMatch.keyboard);
 
     if (mouseMissed || keyboardMissed) {
         finishDualRound(scene, mouseMissed ? dualMatch.mouse.label : dualMatch.keyboard.label);
     }
 }
 
-function updateDualCatchZoneSize(player) {
-    const widthShrink = player.score * (CATCH_SHRINK_PER_SCORE + player.score * 0.03);
-    const heightShrink = player.score * (0.9 + player.score * 0.01);
-    const nextWidth = Math.max(MIN_CATCH_WIDTH, BASE_CATCH_WIDTH - widthShrink);
-    const nextHeight = Math.max(MIN_CATCH_HEIGHT, BASE_CATCH_HEIGHT - heightShrink);
+function enforceDualLaneBounds(player) {
+    if (!player?.potato?.active || !player.potato.body) return;
+    const body = player.potato.body;
+    const radiusY = (body.height || 20) / 2;
+    const minY = player.laneTop + radiusY;
+    const maxY = player.laneBottom - radiusY;
+    if (player.potato.y < minY) {
+        player.potato.y = minY;
+        body.velocity.y = Math.max(0, body.velocity.y);
+    } else if (player.potato.y > maxY) {
+        player.potato.y = maxY;
+        body.velocity.y = Math.min(0, body.velocity.y);
+    }
+}
+
+function hasDualPlayerMissed(player) {
+    if (!player?.potato?.active) return false;
+    const body = player.potato.body;
+    if (!body) return false;
+
+    const halfH = (body.height || 20) / 2;
+    const laneBottomY = player.laneBottom - halfH - 1;
+    return player.potato.y >= laneBottomY;
+}
+
+function updateDualCatchZoneSize(scene, player) {
+    const { baseWidth, baseHeight } = getDualBaseZoneSize(player);
+    const hasShrink = scene.time.now < player.shrinkUntil;
+    const boxScale = hasShrink ? 0.7 : 1;
+    const targetWidth = Math.max(MIN_CATCH_WIDTH, baseWidth * boxScale);
+    const targetHeight = Math.max(MIN_CATCH_HEIGHT, baseHeight * boxScale);
+    player.minZoneWidth = Math.max(MIN_CATCH_WIDTH, Math.min(player.minZoneWidth, targetWidth));
+    player.minZoneHeight = Math.max(MIN_CATCH_HEIGHT, Math.min(player.minZoneHeight, targetHeight));
+    const nextWidth = player.minZoneWidth;
+    const nextHeight = player.minZoneHeight;
 
     player.leftZone.setSize(nextWidth, nextHeight);
     player.rightZone.setSize(nextWidth, nextHeight);
+    player.leftZone.setDisplaySize(nextWidth, nextHeight);
+    player.rightZone.setDisplaySize(nextWidth, nextHeight);
     player.leftZone.body.setSize(nextWidth, nextHeight, true);
     player.rightZone.body.setSize(nextWidth, nextHeight, true);
 }
 
-function finishDualRound(scene, loserLabel) {
+function getDualBaseZoneSize(player) {
+    const widthShrink = player.score * (CATCH_SHRINK_PER_SCORE + player.score * 0.03);
+    const heightShrink = player.score * (0.9 + player.score * 0.01);
+    const baseWidth = Math.max(MIN_CATCH_WIDTH, BASE_CATCH_WIDTH - widthShrink);
+    const baseHeight = Math.max(MIN_CATCH_HEIGHT, BASE_CATCH_HEIGHT - heightShrink);
+    return { baseWidth, baseHeight };
+}
+
+function scheduleNextDualPowerUp(scene) {
+    if (!dualMatch || dualMatch.ended || !dualPowerUpGroup) return;
+    if (dualPowerSpawnEvent) {
+        dualPowerSpawnEvent.remove(false);
+        dualPowerSpawnEvent = null;
+    }
+    dualPowerSpawnEvent = scene.time.delayedCall(Phaser.Math.Between(6000, 10000), () => {
+        spawnDualPowerUp(scene);
+        scheduleNextDualPowerUp(scene);
+    });
+}
+
+function spawnDualPowerUp(scene) {
+    if (!dualPowerUpGroup || !dualMatch || dualMatch.ended) return;
+    const type = pickDualPowerType(scene);
+    const spec = getDualPowerSpec(type);
+    if (!spec) return;
+
+    const item = scene.add.image(Phaser.Math.Between(34, GAME_WIDTH - 34), -20, spec.texture);
+    item.setDisplaySize(30, 30);
+    item.setAlpha(0.98);
+    item.setData('fallSpeed', Phaser.Math.Between(155, 205));
+    item.setData('type', type);
+    item.setData('spawnMs', scene.time.now);
+    item.setData('collected', false);
+    dualPowerUpGroup.add(item);
+    if (dualGroup) dualGroup.add(item);
+}
+
+function updateDualPowerUps(scene, delta) {
+    if (!dualPowerUpGroup) return;
+    dualPowerUpGroup.getChildren().forEach((item) => {
+        if (!item?.active) return;
+        const speed = item.getData('fallSpeed') || 170;
+        item.y += speed * (delta / 1000);
+
+        const tooOld = scene.time.now - (item.getData('spawnMs') || scene.time.now) > 7000;
+        if (item.y > GAME_HEIGHT + 30 || tooOld) {
+            item.destroy();
+            return;
+        }
+
+        const collector = getDualPowerCollector(item);
+        if (collector) collectDualPowerUp(scene, item, collector);
+    });
+}
+
+function getDualPowerCollector(item) {
+    if (!dualMatch || !item?.active) return null;
+    const ib = item.getBounds();
+
+    const mousePotato = dualMatch.mouse?.potato;
+    const keyboardPotato = dualMatch.keyboard?.potato;
+    const mouseHits = !!mousePotato?.active && Phaser.Geom.Intersects.RectangleToRectangle(ib, mousePotato.getBounds());
+    const keyboardHits = !!keyboardPotato?.active && Phaser.Geom.Intersects.RectangleToRectangle(ib, keyboardPotato.getBounds());
+
+    if (mouseHits && keyboardHits) {
+        const mouseDist = Phaser.Math.Distance.Between(item.x, item.y, mousePotato.x, mousePotato.y);
+        const keyboardDist = Phaser.Math.Distance.Between(item.x, item.y, keyboardPotato.x, keyboardPotato.y);
+        return mouseDist <= keyboardDist ? dualMatch.mouse : dualMatch.keyboard;
+    }
+    if (mouseHits) return dualMatch.mouse;
+    if (keyboardHits) return dualMatch.keyboard;
+
+    return null;
+}
+
+function collectDualPowerUp(scene, item, collector) {
+    if (!item?.active || !collector || !dualMatch || dualMatch.ended) return;
+    if (item.getData('collected')) return;
+
+    item.setData('collected', true);
+    const type = item.getData('type');
+    showDualPowerPickupPopup(scene, collector, type);
+    item.destroy();
+    applyDualPowerEffect(scene, collector, type);
+}
+
+function applyDualPowerEffect(scene, collector, type) {
+    const now = scene.time.now;
+    const opponent = collector === dualMatch.mouse ? dualMatch.keyboard : dualMatch.mouse;
+    const attackerName = collector.label;
+    const defenderName = opponent.label;
+
+    if (type === DUAL_POWER_TYPES.SHIELD) {
+        collector.shieldUntil = Math.max(collector.shieldUntil, now + 5000);
+        showDualPowerNotice(scene, `${attackerName} got Shield (5s)`);
+        playSfx('power');
+        return;
+    }
+
+    if (type === DUAL_POWER_TYPES.BIGBOX) {
+        collector.shieldUntil = Math.max(collector.shieldUntil, now + 5000);
+        showDualPowerNotice(scene, `${attackerName} converted to Shield (5s)`);
+        playSfx('power');
+        return;
+    }
+
+    if (type === DUAL_POWER_TYPES.SHRINK_UP) {
+        const { baseWidth, baseHeight } = getDualBaseZoneSize(collector);
+        collector.shrinkUntil = 0;
+        collector.minZoneWidth = Math.min(baseWidth, collector.minZoneWidth + 34);
+        collector.minZoneHeight = Math.min(baseHeight, collector.minZoneHeight + 12);
+        updateDualCatchZoneSize(scene, collector);
+        showDualPowerNotice(scene, `${attackerName} got Shrink Up`);
+        playSfx('power');
+        return;
+    }
+
+    if (type === DUAL_POWER_TYPES.STUN) {
+        collector.stunnedUntil = Math.max(collector.stunnedUntil, now + 1200);
+        collector.canSwitch = false;
+        scene.time.delayedCall(1200, () => {
+            if (!collector || !collector.leftHand?.active) return;
+            collector.canSwitch = true;
+        });
+        showDualPowerNotice(scene, `${attackerName} hit a trap: Stunned`);
+        playSfx('miss');
+        return;
+    }
+
+    if (now < dualMatch.powerGraceUntil) {
+        showDualPowerNotice(scene, 'Harmful effect blocked: opening grace period');
+        return;
+    }
+
+    if (scene.time.now < opponent.shieldUntil) {
+        opponent.shieldUntil = 0;
+        showDualPowerNotice(scene, `${defenderName} blocked with Shield`);
+        playSfx('click');
+        return;
+    }
+
+    if (type === DUAL_POWER_TYPES.SHRINK) {
+        if (hasActiveDualDebuff(scene, opponent)) {
+            collector.shieldUntil = Math.max(collector.shieldUntil, now + 3000);
+            showDualPowerNotice(scene, `${defenderName} resisted. ${attackerName} gets Shield`);
+            return;
+        }
+        opponent.shrinkUntil = Math.max(opponent.shrinkUntil, now + 5000);
+        updateDualCatchZoneSize(scene, opponent);
+        showDualPowerNotice(scene, `${attackerName} shrank ${defenderName}'s catch zone`);
+        playSfx('power');
+        return;
+    }
+
+    if (type === DUAL_POWER_TYPES.HEAVY) {
+        if (hasActiveDualDebuff(scene, opponent)) {
+            collector.shieldUntil = Math.max(collector.shieldUntil, now + 3000);
+            showDualPowerNotice(scene, `${defenderName} resisted. ${attackerName} gets Shield`);
+            return;
+        }
+        opponent.heavyUntil = Math.max(opponent.heavyUntil, now + 5000);
+        showDualPowerNotice(scene, `${attackerName} made ${defenderName}'s potato heavy`);
+        playSfx('power');
+        return;
+    }
+
+    if (type === DUAL_POWER_TYPES.LASER) {
+        if (hasActiveDualDebuff(scene, opponent)) {
+            collector.shieldUntil = Math.max(collector.shieldUntil, now + 3000);
+            showDualPowerNotice(scene, `${defenderName} resisted laser chain`);
+            return;
+        }
+        fireDualLaser(scene, collector, opponent);
+    }
+}
+
+function fireDualLaser(scene, collector, opponent) {
+    const y = opponent.leftHand.y - 54;
+    const beam = scene.add.rectangle(GAME_WIDTH / 2, y, GAME_WIDTH - 26, 10, 0xff1744, 0.9);
+    beam.setStrokeStyle(2, 0xffffff, 0.95);
+    dualGroup.add(beam);
+
+    showDualPowerNotice(scene, `${collector.label} fired LASER at ${opponent.label}`);
+    playSfx('power');
+
+    scene.time.delayedCall(180, () => {
+        if (!opponent?.potato?.active) return;
+        opponent.potato.setVelocityY(Math.max(opponent.potato.body.velocity.y, 430));
+        opponent.heavyUntil = Math.max(opponent.heavyUntil, scene.time.now + 1500);
+    });
+    scene.time.delayedCall(320, () => beam.destroy());
+}
+
+function hasActiveDualDebuff(scene, player) {
+    return scene.time.now < player.shrinkUntil || scene.time.now < player.heavyUntil;
+}
+
+function updateDualPlayerEffects(scene, player) {
+    updateDualCatchZoneSize(scene, player);
+    const leftMs = Math.max(0, player.shieldUntil - scene.time.now);
+    const shrinkMs = Math.max(0, player.shrinkUntil - scene.time.now);
+    const heavyMs = Math.max(0, player.heavyUntil - scene.time.now);
+    const stunMs = Math.max(0, player.stunnedUntil - scene.time.now);
+
+    const effects = [];
+    if (leftMs > 0) effects.push(`Shield ${Math.ceil(leftMs / 1000)}s`);
+    if (shrinkMs > 0) effects.push(`Shrunk ${Math.ceil(shrinkMs / 1000)}s`);
+    if (heavyMs > 0) effects.push(`Heavy ${Math.ceil(heavyMs / 1000)}s`);
+    if (stunMs > 0) effects.push(`Stun ${Math.ceil(stunMs / 1000)}s`);
+    const nextEffectText = effects.join(' | ');
+    if (player.effectText.text !== nextEffectText) {
+        player.effectText.setText(nextEffectText);
+    }
+}
+
+function showDualPowerNotice(scene, text) {
+    if (!dualPowerNoticeText) return;
+    dualPowerNoticeText.setText(text);
+    dualPowerNoticeText.setAlpha(1);
+    scene.tweens.killTweensOf(dualPowerNoticeText);
+    scene.tweens.add({
+        targets: dualPowerNoticeText,
+        alpha: 0,
+        duration: 1400
+    });
+}
+
+function pickDualPowerType(scene) {
+    const roll = Phaser.Math.FloatBetween(0, 1);
+    let bucket = 'attack';
+    if (roll < 0.3) bucket = 'boost';
+    else if (roll < 0.5) bucket = 'trap';
+
+    let type;
+    if (bucket === 'boost') {
+        type = Phaser.Math.FloatBetween(0, 1) < 0.5 ? DUAL_POWER_TYPES.SHIELD : DUAL_POWER_TYPES.SHRINK_UP;
+    } else if (bucket === 'trap') {
+        type = DUAL_POWER_TYPES.STUN;
+    } else {
+        const rareRoll = Phaser.Math.FloatBetween(0, 1);
+        if (rareRoll < 0.05) type = DUAL_POWER_TYPES.LASER;
+        else if (rareRoll < 0.55) type = DUAL_POWER_TYPES.SHRINK;
+        else type = DUAL_POWER_TYPES.HEAVY;
+    }
+
+    if (type === dualLastPowerType) {
+        if (type === DUAL_POWER_TYPES.SHIELD) type = DUAL_POWER_TYPES.SHRINK_UP;
+        else if (type === DUAL_POWER_TYPES.SHRINK_UP) type = DUAL_POWER_TYPES.SHIELD;
+        else type = DUAL_POWER_TYPES.SHIELD;
+    }
+    dualLastPowerType = type;
+    return type;
+}
+
+function getDualPowerSpec(type) {
+    if (type === DUAL_POWER_TYPES.SHIELD) return { texture: 'pup_shield' };
+    if (type === DUAL_POWER_TYPES.BIGBOX) return { texture: 'pup_bigbox' };
+    if (type === DUAL_POWER_TYPES.SHRINK_UP) return { texture: 'pup_shrinkup' };
+    if (type === DUAL_POWER_TYPES.SHRINK) return { texture: 'pup_shrink' };
+    if (type === DUAL_POWER_TYPES.HEAVY) return { texture: 'pup_heavy' };
+    if (type === DUAL_POWER_TYPES.STUN) return { texture: 'pup_stun' };
+    if (type === DUAL_POWER_TYPES.LASER) return { texture: 'pup_laser' };
+    return null;
+}
+
+function getDualPowerLabel(type) {
+    if (type === DUAL_POWER_TYPES.SHIELD) return 'Shield';
+    if (type === DUAL_POWER_TYPES.BIGBOX) return 'BigBox';
+    if (type === DUAL_POWER_TYPES.SHRINK_UP) return 'Shrink Up';
+    if (type === DUAL_POWER_TYPES.SHRINK) return 'Shrink';
+    if (type === DUAL_POWER_TYPES.HEAVY) return 'Heavy';
+    if (type === DUAL_POWER_TYPES.STUN) return 'Stun Trap';
+    if (type === DUAL_POWER_TYPES.LASER) return 'Laser';
+    return 'Power-Up';
+}
+
+function showDualPowerPickupPopup(scene, collector, type) {
+    if (!collector?.potato?.active) return;
+    const label = getDualPowerLabel(type);
+    const popup = scene.add.text(collector.potato.x, collector.potato.y - 28, label, {
+        fontSize: '18px',
+        fill: '#fffde7',
+        fontFamily: 'Trebuchet MS',
+        fontStyle: 'bold',
+        stroke: '#1b5e20',
+        strokeThickness: 4
+    }).setOrigin(0.5);
+
+    if (dualGroup) dualGroup.add(popup);
+    scene.tweens.add({
+        targets: popup,
+        y: popup.y - 24,
+        alpha: 0,
+        duration: 1000,
+        ease: 'Sine.easeOut',
+        onComplete: () => popup.destroy()
+    });
+}
+
+function ensureDualPowerIconTextures(scene) {
+    const build = (key, bgColor, drawSymbol) => {
+        if (scene.textures.exists(key)) return;
+        const g = scene.make.graphics({ x: 0, y: 0, add: false });
+        g.fillStyle(bgColor, 1);
+        g.fillCircle(16, 16, 15);
+        g.lineStyle(2, 0xffffff, 0.95);
+        g.strokeCircle(16, 16, 14);
+        drawSymbol(g);
+        g.generateTexture(key, 32, 32);
+        g.destroy();
+    };
+
+    build('pup_shield', 0x42a5f5, (g) => {
+        g.fillStyle(0xffffff, 1);
+        g.fillPoints([
+            new Phaser.Geom.Point(16, 8),
+            new Phaser.Geom.Point(23, 11),
+            new Phaser.Geom.Point(22, 19),
+            new Phaser.Geom.Point(16, 24),
+            new Phaser.Geom.Point(10, 19),
+            new Phaser.Geom.Point(9, 11)
+        ], true);
+    });
+
+    build('pup_bigbox', 0x66bb6a, (g) => {
+        g.lineStyle(3, 0xffffff, 1);
+        g.strokeRect(9, 9, 14, 14);
+        g.lineBetween(6, 16, 9, 16);
+        g.lineBetween(23, 16, 26, 16);
+        g.lineBetween(16, 6, 16, 9);
+        g.lineBetween(16, 23, 16, 26);
+    });
+
+    build('pup_shrinkup', 0x7cb342, (g) => {
+        g.lineStyle(3, 0xffffff, 1);
+        g.strokeRect(10, 10, 12, 12);
+        g.lineBetween(6, 16, 9, 16);
+        g.lineBetween(23, 16, 26, 16);
+        g.lineBetween(16, 6, 16, 9);
+        g.lineBetween(16, 23, 16, 26);
+    });
+
+    build('pup_shrink', 0xef5350, (g) => {
+        g.lineStyle(3, 0xffffff, 1);
+        g.strokeRect(9, 9, 14, 14);
+        g.lineBetween(11, 16, 14, 16);
+        g.lineBetween(21, 16, 18, 16);
+        g.lineBetween(16, 11, 16, 14);
+        g.lineBetween(16, 21, 16, 18);
+    });
+
+    build('pup_heavy', 0x8d6e63, (g) => {
+        g.fillStyle(0xffffff, 1);
+        g.fillRect(10, 14, 12, 4);
+        g.fillRect(7, 12, 3, 8);
+        g.fillRect(22, 12, 3, 8);
+    });
+
+    build('pup_stun', 0xffb300, (g) => {
+        g.fillStyle(0xffffff, 1);
+        g.fillPoints([
+            new Phaser.Geom.Point(18, 7),
+            new Phaser.Geom.Point(12, 16),
+            new Phaser.Geom.Point(17, 16),
+            new Phaser.Geom.Point(13, 25),
+            new Phaser.Geom.Point(21, 14),
+            new Phaser.Geom.Point(16, 14)
+        ], true);
+    });
+
+    build('pup_laser', 0xd500f9, (g) => {
+        g.lineStyle(2, 0xffffff, 1);
+        g.strokeCircle(16, 16, 7);
+        g.lineBetween(5, 16, 27, 16);
+        g.lineBetween(16, 5, 16, 27);
+    });
+}
+
+function finishDualRound(scene, loserLabel, reasonText = 'missed the catch') {
     if (!dualMatch || dualMatch.ended) return;
     dualMatch.ended = true;
+    if (dualPowerSpawnEvent) {
+        dualPowerSpawnEvent.remove(false);
+        dualPowerSpawnEvent = null;
+    }
+    if (dualPowerUpGroup) {
+        dualPowerUpGroup.clear(true, true);
+    }
 
     const loser = loserLabel === dualMatch.mouse.label ? dualMatch.mouse : dualMatch.keyboard;
     const winner = loser === dualMatch.mouse ? dualMatch.keyboard : dualMatch.mouse;
@@ -974,7 +1546,7 @@ function finishDualRound(scene, loserLabel) {
         stroke: '#fff3e0',
         strokeThickness: 6
     }).setOrigin(0.5);
-    const info = scene.add.text(GAME_WIDTH / 2, 302, `${loser.label} missed the catch\nSeries: ${dualMatch.mouse.wins} - ${dualMatch.keyboard.wins}`, {
+    const info = scene.add.text(GAME_WIDTH / 2, 302, `${loser.label} ${reasonText}\nSeries: ${dualMatch.mouse.wins} - ${dualMatch.keyboard.wins}`, {
         fontSize: '24px',
         fill: '#263238',
         align: 'center',
@@ -1000,23 +1572,33 @@ function prepareNextDualRound(scene) {
     }
 
     dualMatch.round += 1;
-    resetDualPlayerForRound(dualMatch.mouse);
-    resetDualPlayerForRound(dualMatch.keyboard);
+    dualRunStartMs = scene.time.now;
+    dualMatch.powerGraceUntil = scene.time.now + 5000;
+    resetDualPlayerForRound(scene, dualMatch.mouse);
+    resetDualPlayerForRound(scene, dualMatch.keyboard);
     dualMatch.ended = false;
+    scheduleNextDualPowerUp(scene);
     updateDualSeriesHud();
 }
 
-function resetDualPlayerForRound(player) {
+function resetDualPlayerForRound(scene, player) {
     if (!player) return;
     player.score = 0;
     player.canSwitch = true;
     player.inFlight = false;
     player.currentSide = 'left';
+    player.shieldUntil = 0;
+    player.shrinkUntil = 0;
+    player.heavyUntil = 0;
+    player.stunnedUntil = 0;
+    player.minZoneWidth = BASE_CATCH_WIDTH;
+    player.minZoneHeight = BASE_CATCH_HEIGHT;
     if (player.leftHand) player.potato.setPosition(player.leftHand.x, player.leftHand.y - POTATO_Y_OFFSET);
     player.potato.setVelocity(0);
     player.potato.setAngularVelocity(0);
     player.scoreText.setText(`${player.label}: 0`);
-    updateDualCatchZoneSize(player);
+    if (player.effectText) player.effectText.setText('');
+    updateDualCatchZoneSize(scene, player);
 }
 
 function updateDualSeriesHud() {
@@ -1094,6 +1676,7 @@ function cleanupGame(scene) {
     leftHand = null;
     rightHand = null;
     currentHand = null;
+    timerText = null;
 
     if (gameplayGroup) {
         gameplayGroup.destroy(true);
@@ -1105,6 +1688,17 @@ function cleanupGame(scene) {
 }
 
 function cleanupDualGame(scene) {
+    if (dualPowerSpawnEvent) {
+        dualPowerSpawnEvent.remove(false);
+        dualPowerSpawnEvent = null;
+    }
+    if (dualPowerUpGroup) {
+        dualPowerUpGroup.clear(true, true);
+        dualPowerUpGroup = null;
+    }
+    dualPowerNoticeText = null;
+    dualLastPowerType = null;
+
     if (dualResultGroup) {
         dualResultGroup.destroy(true);
         dualResultGroup = null;
@@ -1125,9 +1719,11 @@ function cleanupDualGame(scene) {
             if (player.leftHand) player.leftHand.destroy();
             if (player.rightHand) player.rightHand.destroy();
             if (player.scoreText) player.scoreText.destroy();
+            if (player.effectText) player.effectText.destroy();
         });
         dualMatch = null;
     }
+    dualTimerText = null;
 
     if (scene && scene.physics && scene.physics.world) {
         scene.physics.world.gravity.y = 600;
@@ -1224,6 +1820,56 @@ function toggleSound(scene) {
     if (soundEnabled) playSfx('click');
 }
 
+function toggleSingleTimer(buttonText) {
+    singleTimerEnabled = !singleTimerEnabled;
+    localStorage.setItem('tabandatato_timer_single', singleTimerEnabled ? 'on' : 'off');
+    if (buttonText) buttonText.setText(`1P Timer: ${singleTimerEnabled ? 'ON' : 'OFF'}`);
+}
+
+function toggleDualTimer(buttonText) {
+    dualTimerEnabled = !dualTimerEnabled;
+    localStorage.setItem('tabandatato_timer_dual', dualTimerEnabled ? 'on' : 'off');
+    if (buttonText) buttonText.setText(`2P Timer: ${dualTimerEnabled ? 'ON' : 'OFF'}`);
+}
+
+function cycleSingleTimerSeconds(buttonText) {
+    const idx = TIMER_OPTIONS.indexOf(singleTimerSeconds);
+    singleTimerSeconds = TIMER_OPTIONS[(idx + 1) % TIMER_OPTIONS.length];
+    localStorage.setItem('tabandatato_timer_single_seconds', String(singleTimerSeconds));
+    if (buttonText) buttonText.setText(`1P: ${singleTimerSeconds}s`);
+}
+
+function cycleDualTimerSeconds(buttonText) {
+    const idx = TIMER_OPTIONS.indexOf(dualTimerSeconds);
+    dualTimerSeconds = TIMER_OPTIONS[(idx + 1) % TIMER_OPTIONS.length];
+    localStorage.setItem('tabandatato_timer_dual_seconds', String(dualTimerSeconds));
+    if (buttonText) buttonText.setText(`2P: ${dualTimerSeconds}s`);
+}
+
+function clampTimerSeconds(value) {
+    return TIMER_OPTIONS.includes(value) ? value : 30;
+}
+
+function finishDualRoundByTimer(scene) {
+    if (!dualMatch || dualMatch.ended) return;
+
+    const mouseScore = dualMatch.mouse.score;
+    const keyboardScore = dualMatch.keyboard.score;
+    let loserLabel;
+
+    if (mouseScore < keyboardScore) {
+        loserLabel = dualMatch.mouse.label;
+    } else if (keyboardScore < mouseScore) {
+        loserLabel = dualMatch.keyboard.label;
+    } else {
+        const mouseY = dualMatch.mouse.potato?.y ?? 0;
+        const keyboardY = dualMatch.keyboard.potato?.y ?? 0;
+        loserLabel = mouseY > keyboardY ? dualMatch.mouse.label : dualMatch.keyboard.label;
+    }
+
+    finishDualRound(scene, loserLabel, 'ran out of time');
+}
+
 function playSfx(type) {
     if (!soundEnabled) return;
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -1295,17 +1941,22 @@ function popHand(hand, scene) {
     });
 }
 
-function updateCatchZoneSizeForScore() {
+function updateCatchZoneSizeForScore(scene) {
     if (!leftCatchZone || !rightCatchZone) return;
 
     const widthShrink = score * (CATCH_SHRINK_PER_SCORE + score * 0.03);
     const heightShrink = score * (0.9 + score * 0.01);
+    const elapsedSec = Math.max(0, ((scene?.time.now ?? 0) - runStartMs) / 1000);
+    const timeWidthShrink = elapsedSec * CATCH_SHRINK_PER_SECOND;
+    const timeHeightShrink = elapsedSec * 0.62;
     const bonus = activePowerUp && activePowerUp.type === 'bigbox' ? 1.35 : 1;
-    const nextWidth = Math.max(MIN_CATCH_WIDTH, (BASE_CATCH_WIDTH - widthShrink) * bonus);
-    const nextHeight = Math.max(MIN_CATCH_HEIGHT, (BASE_CATCH_HEIGHT - heightShrink) * bonus);
+    const nextWidth = Math.max(MIN_CATCH_WIDTH, (BASE_CATCH_WIDTH - widthShrink - timeWidthShrink) * bonus);
+    const nextHeight = Math.max(MIN_CATCH_HEIGHT, (BASE_CATCH_HEIGHT - heightShrink - timeHeightShrink) * bonus);
 
     leftCatchZone.setSize(nextWidth, nextHeight);
     rightCatchZone.setSize(nextWidth, nextHeight);
+    leftCatchZone.setDisplaySize(nextWidth, nextHeight);
+    rightCatchZone.setDisplaySize(nextWidth, nextHeight);
     leftCatchZone.body.setSize(nextWidth, nextHeight, true);
     rightCatchZone.body.setSize(nextWidth, nextHeight, true);
 
@@ -1331,7 +1982,7 @@ function activatePowerUp(scene, type) {
         powerUpText.setText('Power-Up: Freeze Time!');
     } else if (type === 'bigbox') {
         powerUpText.setText('Power-Up: Big Catch Box!');
-        updateCatchZoneSizeForScore();
+        updateCatchZoneSizeForScore(scene);
     } else {
         powerUpText.setText('Power-Up: Double Score x2!');
     }
@@ -1361,7 +2012,7 @@ function clearPowerUp(scene, silent = false) {
             });
         }
     }
-    if (leftCatchZone && rightCatchZone) updateCatchZoneSizeForScore();
+    if (leftCatchZone && rightCatchZone) updateCatchZoneSizeForScore(scene);
 }
 
 function showDaddyCheer(scene, x, y) {
