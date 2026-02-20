@@ -11,8 +11,8 @@ const BASE_CATCH_WIDTH = 170;
 const BASE_CATCH_HEIGHT = 56;
 const MIN_CATCH_WIDTH = 24;
 const MIN_CATCH_HEIGHT = 10;
-const CATCH_SHRINK_PER_SCORE = 5.1;
-const CATCH_SHRINK_PER_SECOND = 3.1;
+const CATCH_SHRINK_PER_SCORE = 6.4;
+const CATCH_SHRINK_PER_SECOND = 4.6;
 const TIMER_OPTIONS = [10, 30, 60];
 const DUAL_POWER_TYPES = {
     SHIELD: 'shield',
@@ -1600,8 +1600,28 @@ function finishDualRound(scene, loserLabel, reasonText = 'missed the catch') {
         dualPowerUpGroup.clear(true, true);
     }
 
-    const loser = loserLabel === dualMatch.mouse.label ? dualMatch.mouse : dualMatch.keyboard;
-    const winner = loser === dualMatch.mouse ? dualMatch.keyboard : dualMatch.mouse;
+    const mouse = dualMatch.mouse;
+    const keyboard = dualMatch.keyboard;
+    let winner;
+    let loser;
+
+    if (mouse.score > keyboard.score) {
+        winner = mouse;
+        loser = keyboard;
+    } else if (keyboard.score > mouse.score) {
+        winner = keyboard;
+        loser = mouse;
+    } else {
+        if (loserLabel) {
+            loser = loserLabel === mouse.label ? mouse : keyboard;
+            winner = loser === mouse ? keyboard : mouse;
+        } else {
+            const mouseY = mouse.potato?.y ?? 0;
+            const keyboardY = keyboard.potato?.y ?? 0;
+            loser = mouseY > keyboardY ? mouse : keyboard;
+            winner = loser === mouse ? keyboard : mouse;
+        }
+    }
     winner.wins += 1;
     playSfx('win');
 
@@ -1619,7 +1639,12 @@ function finishDualRound(scene, loserLabel, reasonText = 'missed the catch') {
         stroke: '#fff3e0',
         strokeThickness: 6
     }).setOrigin(0.5);
-    const info = scene.add.text(GAME_WIDTH / 2, 302, `${loser.label} ${reasonText}\nSeries: ${dualMatch.mouse.wins} - ${dualMatch.keyboard.wins}`, {
+    const scoreLine = `Scores: ${mouse.label} ${mouse.score} - ${keyboard.score} ${keyboard.label}`;
+    const endLine = reasonText
+        ? (loserLabel ? `Round ended: ${loserLabel} ${reasonText}` : `Round ended: ${reasonText}`)
+        : '';
+    const infoLines = [scoreLine, endLine, `Series: ${dualMatch.mouse.wins} - ${dualMatch.keyboard.wins}`].filter(Boolean);
+    const info = scene.add.text(GAME_WIDTH / 2, 302, infoLines.join('\n'), {
         fontSize: '24px',
         fill: '#263238',
         align: 'center',
@@ -1935,22 +1960,7 @@ function clampTimerSeconds(value) {
 
 function finishDualRoundByTimer(scene) {
     if (!dualMatch || dualMatch.ended) return;
-
-    const mouseScore = dualMatch.mouse.score;
-    const keyboardScore = dualMatch.keyboard.score;
-    let loserLabel;
-
-    if (mouseScore < keyboardScore) {
-        loserLabel = dualMatch.mouse.label;
-    } else if (keyboardScore < mouseScore) {
-        loserLabel = dualMatch.keyboard.label;
-    } else {
-        const mouseY = dualMatch.mouse.potato?.y ?? 0;
-        const keyboardY = dualMatch.keyboard.potato?.y ?? 0;
-        loserLabel = mouseY > keyboardY ? dualMatch.mouse.label : dualMatch.keyboard.label;
-    }
-
-    finishDualRound(scene, loserLabel, 'ran out of time');
+    finishDualRound(scene, null, 'time is up');
 }
 
 function playSfx(type) {
