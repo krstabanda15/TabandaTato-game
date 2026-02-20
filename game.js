@@ -18,6 +18,10 @@ const CATCH_SHRINK_PER_SCORE = 6.4;
 const CATCH_SHRINK_PER_SECOND = 4.6;
 const TIMER_OPTIONS = [10, 30, 60];
 const BOX_MOVE_SCORE_TRIGGER = 10;
+const SINGLE_OBSTACLE_SCORE_TRIGGER = 25;
+const SINGLE_OBSTACLE_MAX_LIFETIME_MS = 9000;
+const SINGLE_OBSTACLE_SCORE_STEP = 5;
+const SINGLE_OBSTACLE_MAX_PER_WAVE = 5;
 const BOX_MOVE_INTERVAL_MS = 520;
 const BOX_MOVE_MAX_OFFSET_X = 26;
 const BOX_MOVE_MAX_OFFSET_Y = 12;
@@ -49,6 +53,7 @@ const SINGLE_POWER_TYPES = {
     SHIELD: 'shield',
     LASER: 'laser'
 };
+const MAX_SINGLE_SHIELD_CHARGES = 3;
 
 const config = {
     type: Phaser.AUTO,
@@ -136,6 +141,8 @@ let singlePowerUpGroup;
 let singlePowerSpawnEvent;
 let singleLastPowerType = null;
 let singleShieldCharges = 0;
+let singleObstacleGroup;
+let singleObstacleSpawnEvent;
 let boxMoveEvent = null;
 let leftCatchOffsetX = 0;
 let leftCatchOffsetY = 0;
@@ -241,6 +248,7 @@ function update(time, delta) {
     if (gameState === 'playing') {
         updateCatchZoneSizeForScore(this);
         updateSinglePowerUps(this, delta);
+        updateSingleObstacles(this, delta);
         if (singleTimerEnabled && timerText) {
             const elapsedMs = this.time.now - runStartMs - freezeTotalMs - (freezeStartedAt ? this.time.now - freezeStartedAt : 0);
             const remainingSec = Math.max(0, Math.ceil((singleTimerSeconds * 1000 - elapsedMs) / 1000));
@@ -670,6 +678,7 @@ function startActualGame(scene) {
     gameplayGroup = scene.add.group();
     ensureSinglePowerIconTextures(scene);
     singlePowerUpGroup = scene.add.group();
+    singleObstacleGroup = scene.add.group();
 
     leftHand = scene.physics.add.staticImage(LEFT_X, HAND_Y, 'hand').setScale(BASE_HAND_SCALE);
     rightHand = scene.physics.add.staticImage(RIGHT_X, HAND_Y, 'hand').setScale(BASE_HAND_SCALE);
@@ -794,6 +803,7 @@ function onCatch(scene, hand) {
     scoreText.setText(`Score: ${score}`);
     updateCatchZoneSizeForScore(scene);
     maybeEnableMovingBoxes(scene);
+    maybeEnableSingleObstacles(scene);
 
     if (score > bestScore) {
         bestScore = score;
@@ -823,6 +833,7 @@ function onDoubleCatch(scene, hand) {
 
     scoreText.setText(`Score: ${score}`);
     updateCatchZoneSizeForScore(scene);
+    maybeEnableSingleObstacles(scene);
 
     if (score > bestScore) {
         bestScore = score;
@@ -842,7 +853,7 @@ function onDoubleCatch(scene, hand) {
 function loseLife(scene) {
     if (gameState !== 'playing') return;
     if (singleShieldCharges > 0 && potato && currentHand) {
-        singleShieldCharges -= 1;
+        singleShieldCharges = Math.max(0, singleShieldCharges - 1);
         potatoInFlight = false;
         canSwitch = true;
         potato.setVelocity(0);
@@ -875,6 +886,14 @@ function finishGame(scene) {
     if (singlePowerUpGroup) {
         singlePowerUpGroup.clear(true, true);
         singlePowerUpGroup = null;
+    }
+    if (singleObstacleSpawnEvent) {
+        singleObstacleSpawnEvent.remove(false);
+        singleObstacleSpawnEvent = null;
+    }
+    if (singleObstacleGroup) {
+        singleObstacleGroup.clear(true, true);
+        singleObstacleGroup = null;
     }
 
     if (potato) {
@@ -1880,7 +1899,7 @@ function ensureDualPowerIconTextures(scene) {
     });
 }
 
-function finishDualRound(scene, loserLabel, reasonText = 'missed the catch') {
+function finishDualRound(scene, loserLabel, reasonText = 'missed the catch', outcomeMode = 'fall') {
     if (!dualMatch || dualMatch.ended) return;
     dualMatch.ended = true;
     if (dualPowerSpawnEvent) {
@@ -1896,22 +1915,27 @@ function finishDualRound(scene, loserLabel, reasonText = 'missed the catch') {
     let winner;
     let loser;
 
-    if (mouse.score > keyboard.score) {
-        winner = mouse;
-        loser = keyboard;
-    } else if (keyboard.score > mouse.score) {
-        winner = keyboard;
-        loser = mouse;
-    } else {
-        if (loserLabel) {
-            loser = loserLabel === mouse.label ? mouse : keyboard;
-            winner = loser === mouse ? keyboard : mouse;
+    if (outcomeMode === 'timer') {
+        if (mouse.score > keyboard.score) {
+            winner = mouse;
+            loser = keyboard;
+        } else if (keyboard.score > mouse.score) {
+            winner = keyboard;
+            loser = mouse;
         } else {
             const mouseY = mouse.potato?.y ?? 0;
             const keyboardY = keyboard.potato?.y ?? 0;
             loser = mouseY > keyboardY ? mouse : keyboard;
             winner = loser === mouse ? keyboard : mouse;
         }
+    } else if (loserLabel) {
+        loser = loserLabel === mouse.label ? mouse : keyboard;
+        winner = loser === mouse ? keyboard : mouse;
+    } else {
+        const mouseY = mouse.potato?.y ?? 0;
+        const keyboardY = keyboard.potato?.y ?? 0;
+        loser = mouseY > keyboardY ? mouse : keyboard;
+        winner = loser === mouse ? keyboard : mouse;
     }
     winner.wins += 1;
     playSfx('win');
@@ -2060,6 +2084,14 @@ function cleanupGame(scene) {
     if (singlePowerUpGroup) {
         singlePowerUpGroup.clear(true, true);
         singlePowerUpGroup = null;
+    }
+    if (singleObstacleSpawnEvent) {
+        singleObstacleSpawnEvent.remove(false);
+        singleObstacleSpawnEvent = null;
+    }
+    if (singleObstacleGroup) {
+        singleObstacleGroup.clear(true, true);
+        singleObstacleGroup = null;
     }
     singleShieldCharges = 0;
 
@@ -2271,7 +2303,7 @@ function clampTimerSeconds(value) {
 
 function finishDualRoundByTimer(scene) {
     if (!dualMatch || dualMatch.ended) return;
-    finishDualRound(scene, null, 'time is up');
+    finishDualRound(scene, null, 'time is up', 'timer');
 }
 
 function playSfx(type) {
@@ -2531,6 +2563,101 @@ function scheduleNextSinglePowerUp(scene) {
     });
 }
 
+function maybeEnableSingleObstacles(scene) {
+    if (gameState !== 'playing' || score < SINGLE_OBSTACLE_SCORE_TRIGGER) return;
+    if (!singleObstacleGroup || singleObstacleSpawnEvent) return;
+    scheduleNextSingleObstacle(scene);
+}
+
+function scheduleNextSingleObstacle(scene) {
+    if (gameState !== 'playing' || !singleObstacleGroup) return;
+    if (singleObstacleSpawnEvent) {
+        singleObstacleSpawnEvent.remove(false);
+        singleObstacleSpawnEvent = null;
+    }
+    const level = getSingleObstacleLevel();
+    const minDelay = Math.max(420, 1500 - level * 120);
+    const maxDelay = Math.max(700, 2200 - level * 140);
+    singleObstacleSpawnEvent = scene.time.delayedCall(Phaser.Math.Between(minDelay, maxDelay), () => {
+        spawnSingleObstacleWave(scene);
+        scheduleNextSingleObstacle(scene);
+    });
+}
+
+function getSingleObstacleLevel() {
+    if (score < SINGLE_OBSTACLE_SCORE_TRIGGER) return 0;
+    return Math.floor((score - SINGLE_OBSTACLE_SCORE_TRIGGER) / SINGLE_OBSTACLE_SCORE_STEP) + 1;
+}
+
+function getSingleObstacleWaveCount() {
+    const level = getSingleObstacleLevel();
+    return Phaser.Math.Clamp(level, 1, SINGLE_OBSTACLE_MAX_PER_WAVE);
+}
+
+function spawnSingleObstacleWave(scene) {
+    const count = getSingleObstacleWaveCount();
+    for (let i = 0; i < count; i += 1) {
+        spawnSingleObstacle(scene);
+    }
+}
+
+function spawnSingleObstacle(scene) {
+    if (gameState !== 'playing' || !singleObstacleGroup) return;
+    const item = scene.add.image(Phaser.Math.Between(26, GAME_WIDTH - 26), -24, 'single_obstacle');
+    const size = Phaser.Math.Between(24, 40);
+    const level = getSingleObstacleLevel();
+    item.setDisplaySize(size, size);
+    item.setData('fallSpeed', Phaser.Math.Between(185, 250) + Math.min(140, level * 16));
+    item.setData('driftX', Phaser.Math.Between(-70, 70));
+    item.setData('spin', Phaser.Math.FloatBetween(-2.6, 2.6));
+    item.setData('spawnMs', scene.time.now);
+    item.setData('hit', false);
+    singleObstacleGroup.add(item);
+    if (gameplayGroup) gameplayGroup.add(item);
+}
+
+function updateSingleObstacles(scene, delta) {
+    if (gameState !== 'playing' || !singleObstacleGroup || !potato?.active) return;
+    maybeEnableSingleObstacles(scene);
+    let shouldLoseLife = false;
+    const children = singleObstacleGroup.getChildren();
+    for (let i = 0; i < children.length; i += 1) {
+        const item = children[i];
+        if (!item?.active) continue;
+        const speed = item.getData('fallSpeed') || 200;
+        const drift = item.getData('driftX') || 0;
+        const spin = item.getData('spin') || 0;
+        item.y += speed * (delta / 1000);
+        item.x += drift * (delta / 1000);
+        item.rotation += spin * (delta / 1000);
+
+        const tooOld = scene.time.now - (item.getData('spawnMs') || scene.time.now) > SINGLE_OBSTACLE_MAX_LIFETIME_MS;
+        if (item.y > GAME_HEIGHT + 40 || item.x < -50 || item.x > GAME_WIDTH + 50 || tooOld) {
+            item.destroy();
+            continue;
+        }
+
+        if (item.getData('hit')) continue;
+        if (Phaser.Geom.Intersects.RectangleToRectangle(item.getBounds(), potato.getBounds())) {
+            item.setData('hit', true);
+            item.destroy();
+            shouldLoseLife = true;
+            break;
+        }
+    }
+
+    if (shouldLoseLife) {
+        if (powerUpText) {
+            powerUpText.setText('Obstacle hit!');
+            powerUpText.setAlpha(1);
+            scene.tweens.killTweensOf(powerUpText);
+            scene.tweens.add({ targets: powerUpText, alpha: 0, duration: 900, delay: 500 });
+        }
+        scene.cameras.main.shake(120, 0.004);
+        loseLife(scene);
+    }
+}
+
 function spawnSinglePowerUp(scene) {
     if (gameState !== 'playing' || !singlePowerUpGroup) return;
     const type = pickSinglePowerType();
@@ -2607,7 +2734,7 @@ function applySinglePowerEffect(scene, type) {
         return;
     }
     if (type === SINGLE_POWER_TYPES.SHIELD) {
-        singleShieldCharges = Math.min(3, singleShieldCharges + 1);
+        singleShieldCharges = Math.min(MAX_SINGLE_SHIELD_CHARGES, singleShieldCharges + 1);
         if (powerUpText) {
             powerUpText.setText(`Power-Up: Shield x${singleShieldCharges}`);
             powerUpText.setAlpha(1);
@@ -2674,6 +2801,18 @@ function showSinglePowerPickupPopup(scene, type) {
 
 function ensureSinglePowerIconTextures(scene) {
     ensureDualPowerIconTextures(scene);
+    if (!scene.textures.exists('single_obstacle')) {
+        const g = scene.make.graphics({ x: 0, y: 0, add: false });
+        g.fillStyle(0x37474f, 1);
+        g.fillCircle(16, 16, 15);
+        g.lineStyle(2, 0xb0bec5, 1);
+        g.strokeCircle(16, 16, 14);
+        g.fillStyle(0x90a4ae, 0.95);
+        g.fillRect(7, 14, 18, 4);
+        g.fillRect(14, 7, 4, 18);
+        g.generateTexture('single_obstacle', 32, 32);
+        g.destroy();
+    }
     if (!scene.textures.exists('sp_freeze')) {
         const g = scene.make.graphics({ x: 0, y: 0, add: false });
         g.fillStyle(0x29b6f6, 1);
