@@ -9,11 +9,17 @@ const POTATO_GAME_SIZE = 40;
 const BASE_HAND_SCALE = 0.44;
 const BASE_CATCH_WIDTH = 170;
 const BASE_CATCH_HEIGHT = 56;
+const CATCH_ZONE_OFFSET_Y = 14;
 const MIN_CATCH_WIDTH = 24;
 const MIN_CATCH_HEIGHT = 10;
 const CATCH_SHRINK_PER_SCORE = 6.4;
 const CATCH_SHRINK_PER_SECOND = 4.6;
 const TIMER_OPTIONS = [10, 30, 60];
+const BOX_MOVE_SCORE_TRIGGER = 20;
+const BOX_MOVE_INTERVAL_MS = 520;
+const BOX_MOVE_MAX_OFFSET_X = 26;
+const BOX_MOVE_MAX_OFFSET_Y = 12;
+const DIFFICULTY_SCORE_STEP = 10;
 const DUAL_POWER_TYPES = {
     SHIELD: 'shield',
     BIGBOX: 'bigbox',
@@ -111,6 +117,12 @@ let singlePowerUpGroup;
 let singlePowerSpawnEvent;
 let singleLastPowerType = null;
 let singleShieldCharges = 0;
+let boxMoveEvent = null;
+let leftCatchOffsetX = 0;
+let leftCatchOffsetY = 0;
+let rightCatchOffsetX = 0;
+let rightCatchOffsetY = 0;
+let singleDifficultyLevel = 0;
 
 const game = new Phaser.Game(config);
 
@@ -617,6 +629,7 @@ function startActualGame(scene) {
     catchCount = 0;
     canSwitch = true;
     potatoInFlight = false;
+    singleDifficultyLevel = 0;
     clearPowerUp(scene, true);
 
     scene.physics.world.gravity.y = 600;
@@ -631,13 +644,13 @@ function startActualGame(scene) {
     leftHand.refreshBody();
     rightHand.refreshBody();
 
-    leftCatchZone = scene.add.rectangle(LEFT_X, HAND_Y + 14, BASE_CATCH_WIDTH, BASE_CATCH_HEIGHT, 0xffffff, 0.2);
+    leftCatchZone = scene.add.rectangle(LEFT_X, HAND_Y + CATCH_ZONE_OFFSET_Y, BASE_CATCH_WIDTH, BASE_CATCH_HEIGHT, 0xffffff, 0.2);
     leftCatchZone.setStrokeStyle(3, 0x2e7d32, 0.55);
     scene.physics.add.existing(leftCatchZone, false);
     leftCatchZone.body.setAllowGravity(false);
     leftCatchZone.body.setImmovable(true);
 
-    rightCatchZone = scene.add.rectangle(RIGHT_X, HAND_Y + 14, BASE_CATCH_WIDTH, BASE_CATCH_HEIGHT, 0xffffff, 0.2);
+    rightCatchZone = scene.add.rectangle(RIGHT_X, HAND_Y + CATCH_ZONE_OFFSET_Y, BASE_CATCH_WIDTH, BASE_CATCH_HEIGHT, 0xffffff, 0.2);
     rightCatchZone.setStrokeStyle(3, 0x2e7d32, 0.55);
     scene.physics.add.existing(rightCatchZone, false);
     rightCatchZone.body.setAllowGravity(false);
@@ -696,6 +709,7 @@ function startActualGame(scene) {
     if (welcomeText) gameplayGroup.add(welcomeText);
     if (daddyCheerText) gameplayGroup.add(daddyCheerText);
 
+    resetMovingBoxes(scene);
     currentHand = leftHand;
     scheduleNextSinglePowerUp(scene);
 }
@@ -727,10 +741,13 @@ function onCatch(scene, hand) {
     const gain = activePowerUp && activePowerUp.type === 'double' ? 2 : 1;
     score += gain;
 
-    scene.physics.world.gravity.y = 560 + Math.min(score * 8, 220);
+    applySingleDifficulty(scene);
+    const gravityBoost = Math.min(singleDifficultyLevel * 24, 160);
+    scene.physics.world.gravity.y = 560 + Math.min(score * 8, 220) + gravityBoost;
 
     scoreText.setText(`Score: ${score}`);
     updateCatchZoneSizeForScore(scene);
+    maybeEnableMovingBoxes(scene);
 
     if (score > bestScore) {
         bestScore = score;
@@ -1753,6 +1770,7 @@ function endDualSeries(scene, winner, loser) {
 }
 
 function cleanupGame(scene) {
+    resetMovingBoxes(scene);
     if (singlePowerSpawnEvent) {
         singlePowerSpawnEvent.remove(false);
         singlePowerSpawnEvent = null;
@@ -2039,12 +2057,20 @@ function updateCatchZoneSizeForScore(scene) {
 
     const widthShrink = score * (CATCH_SHRINK_PER_SCORE + score * 0.03);
     const heightShrink = score * (0.9 + score * 0.01);
+    const levelWidthShrink = singleDifficultyLevel * 6;
+    const levelHeightShrink = singleDifficultyLevel * 1.2;
     const elapsedSec = Math.max(0, ((scene?.time.now ?? 0) - runStartMs) / 1000);
     const timeWidthShrink = elapsedSec * CATCH_SHRINK_PER_SECOND;
     const timeHeightShrink = elapsedSec * 0.62;
     const bonus = activePowerUp && activePowerUp.type === 'bigbox' ? 1.35 : 1;
-    const nextWidth = Math.max(MIN_CATCH_WIDTH, (BASE_CATCH_WIDTH - widthShrink - timeWidthShrink) * bonus);
-    const nextHeight = Math.max(MIN_CATCH_HEIGHT, (BASE_CATCH_HEIGHT - heightShrink - timeHeightShrink) * bonus);
+    const nextWidth = Math.max(
+        MIN_CATCH_WIDTH,
+        (BASE_CATCH_WIDTH - widthShrink - timeWidthShrink - levelWidthShrink) * bonus
+    );
+    const nextHeight = Math.max(
+        MIN_CATCH_HEIGHT,
+        (BASE_CATCH_HEIGHT - heightShrink - timeHeightShrink - levelHeightShrink) * bonus
+    );
 
     leftCatchZone.setSize(nextWidth, nextHeight);
     rightCatchZone.setSize(nextWidth, nextHeight);
@@ -2056,6 +2082,76 @@ function updateCatchZoneSizeForScore(scene) {
     const alpha = Phaser.Math.Linear(0.2, 0.08, (BASE_CATCH_WIDTH - nextWidth) / (BASE_CATCH_WIDTH - MIN_CATCH_WIDTH));
     leftCatchZone.setFillStyle(0xffffff, alpha);
     rightCatchZone.setFillStyle(0xffffff, alpha);
+
+    updateCatchZonePositions(scene);
+}
+
+function updateCatchZonePositions(scene) {
+    if (!leftCatchZone || !rightCatchZone) return;
+    leftCatchZone.setPosition(LEFT_X + leftCatchOffsetX, HAND_Y + CATCH_ZONE_OFFSET_Y + leftCatchOffsetY);
+    rightCatchZone.setPosition(RIGHT_X + rightCatchOffsetX, HAND_Y + CATCH_ZONE_OFFSET_Y + rightCatchOffsetY);
+    leftCatchZone.body?.updateFromGameObject();
+    rightCatchZone.body?.updateFromGameObject();
+}
+
+function getSingleDifficultyLevel(currentScore) {
+    if (currentScore < BOX_MOVE_SCORE_TRIGGER) return 0;
+    return Math.floor((currentScore - BOX_MOVE_SCORE_TRIGGER) / DIFFICULTY_SCORE_STEP) + 1;
+}
+
+function applySingleDifficulty(scene) {
+    const nextLevel = getSingleDifficultyLevel(score);
+    if (nextLevel === singleDifficultyLevel) return;
+    singleDifficultyLevel = nextLevel;
+    refreshBoxMoveEvent(scene);
+}
+
+function getBoxMoveSettings() {
+    const level = singleDifficultyLevel;
+    return {
+        interval: Math.max(260, BOX_MOVE_INTERVAL_MS - level * 40),
+        maxOffsetX: Math.min(60, BOX_MOVE_MAX_OFFSET_X + level * 6),
+        maxOffsetY: Math.min(28, BOX_MOVE_MAX_OFFSET_Y + level * 3)
+    };
+}
+
+function refreshBoxMoveEvent(scene) {
+    if (score < BOX_MOVE_SCORE_TRIGGER) return;
+    if (boxMoveEvent) {
+        boxMoveEvent.remove(false);
+        boxMoveEvent = null;
+    }
+    const { interval } = getBoxMoveSettings();
+    boxMoveEvent = scene.time.addEvent({
+        delay: interval,
+        loop: true,
+        callback: () => {
+            const { maxOffsetX, maxOffsetY } = getBoxMoveSettings();
+            leftCatchOffsetX = Phaser.Math.Between(-maxOffsetX, maxOffsetX);
+            leftCatchOffsetY = Phaser.Math.Between(-maxOffsetY, maxOffsetY);
+            rightCatchOffsetX = Phaser.Math.Between(-maxOffsetX, maxOffsetX);
+            rightCatchOffsetY = Phaser.Math.Between(-maxOffsetY, maxOffsetY);
+            updateCatchZonePositions(scene);
+        }
+    });
+    updateCatchZonePositions(scene);
+}
+
+function maybeEnableMovingBoxes(scene) {
+    if (score < BOX_MOVE_SCORE_TRIGGER || boxMoveEvent) return;
+    refreshBoxMoveEvent(scene);
+}
+
+function resetMovingBoxes(scene) {
+    if (boxMoveEvent) {
+        boxMoveEvent.remove(false);
+        boxMoveEvent = null;
+    }
+    leftCatchOffsetX = 0;
+    leftCatchOffsetY = 0;
+    rightCatchOffsetX = 0;
+    rightCatchOffsetY = 0;
+    updateCatchZonePositions(scene);
 }
 
 function scheduleNextSinglePowerUp(scene) {
@@ -2112,8 +2208,10 @@ function updateSinglePowerUps(scene, delta) {
 
 function pickSinglePowerType() {
     const roll = Phaser.Math.FloatBetween(0, 1);
+    const level = getSingleDifficultyLevel(score);
+    const boostChance = score >= BOX_MOVE_SCORE_TRIGGER ? Math.max(0.32, 0.62 - level * 0.05) : 0.68;
     let type;
-    if (roll < 0.68) {
+    if (roll < boostChance) {
         const boosts = [
             SINGLE_POWER_TYPES.FREEZE,
             SINGLE_POWER_TYPES.DOUBLE,
@@ -2342,8 +2440,10 @@ function saveLeaderboardEntry(player, playerScore) {
 }
 
 function resetLeaderboard() {
-    localStorage.removeItem('tabandatato_leaderboard');
-    localStorage.removeItem('tabandatato_dual_leaderboard');
+    const singleTop = getLeaderboard().slice(0, 3);
+    const dualTop = getDualLeaderboard().slice(0, 3);
+    localStorage.setItem('tabandatato_leaderboard', JSON.stringify(singleTop));
+    localStorage.setItem('tabandatato_dual_leaderboard', JSON.stringify(dualTop));
 }
 
 function getDualLeaderboard() {
@@ -2426,4 +2526,3 @@ function burstSparkles(scene, x, y, pieces = 12) {
         });
     }
 }
-
