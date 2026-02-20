@@ -17,6 +17,7 @@ const MIN_CATCH_HEIGHT = 10;
 const CATCH_SHRINK_PER_SCORE = 6.4;
 const CATCH_SHRINK_PER_SECOND = 4.6;
 const TIMER_OPTIONS = [10, 30, 60];
+const SINGLE_DIFFICULTY_OPTIONS = ['Easy', 'Medium', 'Very Hard'];
 const BOX_MOVE_SCORE_TRIGGER = 10;
 const SINGLE_OBSTACLE_SCORE_TRIGGER = 25;
 const SINGLE_OBSTACLE_MAX_LIFETIME_MS = 9000;
@@ -100,6 +101,7 @@ let singleTimerEnabled = true;
 let dualTimerEnabled = true;
 let singleTimerSeconds = 30;
 let dualTimerSeconds = 120;
+let singleDifficultyMode = 'Medium';
 let freezeStartedAt = null;
 let freezeTotalMs = 0;
 
@@ -144,6 +146,12 @@ let singleShieldCharges = 0;
 let singleObstacleGroup;
 let singleObstacleSpawnEvent;
 let boxMoveEvent = null;
+let isGamePaused = false;
+let pausedMode = null;
+let pauseOverlayGroup = null;
+let pauseOverlayResumeButton = null;
+let singlePauseButton = null;
+let dualPauseButton = null;
 let leftCatchOffsetX = 0;
 let leftCatchOffsetY = 0;
 let rightCatchOffsetX = 0;
@@ -194,8 +202,10 @@ function create() {
     dualTimerEnabled = true;
     singleTimerSeconds = clampTimerSeconds(parseInt(localStorage.getItem('tabandatato_timer_single_seconds'), 10) || 30);
     dualTimerSeconds = 120;
+    singleDifficultyMode = clampSingleDifficulty(localStorage.getItem('tabandatato_difficulty'));
 
     this.input.on('pointerdown', (pointer, gameObjects) => {
+        if (isGamePaused) return;
         if (gameObjects.length > 0) return;
         if (gameState === 'playing') {
             switchHand(this);
@@ -204,12 +214,19 @@ function create() {
         }
     });
     this.input.keyboard.on('keydown-SPACE', () => {
+        if (isGamePaused) return;
         if (gameState === 'dual') switchDualHand(this, 'keyboard');
     });
     this.input.keyboard.on('keydown-UP', () => {
+        if (isGamePaused) return;
         if (gameState === 'dual') switchDualHand(this, 'keyboard');
     });
-    this.input.keyboard.addCapture(['SPACE', 'UP']);
+    this.input.keyboard.on('keydown-ESC', () => {
+        if (gameState === 'playing' || gameState === 'dual' || isGamePaused) {
+            togglePause(this);
+        }
+    });
+    this.input.keyboard.addCapture(['SPACE', 'UP', 'ESC']);
 
     showIntro(this);
 }
@@ -245,6 +262,7 @@ function ensureCoreTextures(scene) {
 }
 
 function update(time, delta) {
+    if (isGamePaused) return;
     if (gameState === 'playing') {
         updateCatchZoneSizeForScore(this);
         updateSinglePowerUps(this, delta);
@@ -419,15 +437,26 @@ function showModeSelect(scene) {
         160,
         20
     );
+    const onePlayerDifficultyOption = createToggleButton(
+        scene,
+        GAME_WIDTH / 2,
+        515,
+        `1P Difficulty: ${singleDifficultyMode}`,
+        '#283593',
+        () => cycleSingleDifficulty(onePlayerDifficultyOption),
+        320,
+        20
+    );
     const backBtn = createButton(scene, GAME_WIDTH / 2, 510, 'Back', '#546e7a', () => showIntro(scene), 180, 26);
 
-    backBtn.setY(560);
+    backBtn.setY(585);
     modeSelectGroup.addMultiple([
         title,
         onePlayerBtn,
         twoPlayerBtn,
         onePlayerTimerToggle,
         onePlayerTimerOption,
+        onePlayerDifficultyOption,
         backBtn
     ]);
 }
@@ -671,6 +700,7 @@ function startActualGame(scene) {
     freezeStartedAt = null;
     freezeTotalMs = 0;
     clearPowerUp(scene, true);
+    resetPauseState(scene);
 
     scene.physics.world.gravity.y = 600;
     scene.physics.world.setBoundsCollision(true, true, false, false);
@@ -744,7 +774,7 @@ function startActualGame(scene) {
             align: 'center'
         }).setOrigin(0.5).setAlpha(0);
     }
-    const gameHintText = scene.add.text(GAME_WIDTH / 2, selectedPlayer === 'Daddy' ? 124 : 94, 'Catch box starts big, then gets smaller', {
+    const gameHintText = scene.add.text(GAME_WIDTH / 2, selectedPlayer === 'Daddy' ? 124 : 94, `Difficulty: ${singleDifficultyMode} | Catch box starts big, then gets smaller`, {
         fontSize: '20px',
         fill: '#004d40',
         fontFamily: 'Trebuchet MS'
@@ -755,10 +785,20 @@ function startActualGame(scene) {
         fontFamily: 'Trebuchet MS',
         fontStyle: 'bold'
     }).setOrigin(0.5).setAlpha(0);
+    singlePauseButton = createToggleButton(
+        scene,
+        GAME_WIDTH - 66,
+        54,
+        'Pause',
+        '#6d4c41',
+        () => togglePause(scene),
+        118,
+        18
+    );
 
     gameplayGroup.addMultiple([
         leftCatchZone, rightCatchZone, leftHand, rightHand, potato,
-        scoreText, bestText, playerText, gameHintText, powerUpText
+        scoreText, bestText, playerText, gameHintText, powerUpText, singlePauseButton
     ]);
     if (timerText) gameplayGroup.add(timerText);
     if (welcomeText) gameplayGroup.add(welcomeText);
@@ -770,7 +810,7 @@ function startActualGame(scene) {
 }
 
 function switchHand(scene) {
-    if (!canSwitch || !potato || gameState !== 'playing') return;
+    if (isGamePaused || !canSwitch || !potato || gameState !== 'playing') return;
 
     canSwitch = false;
     potatoInFlight = true;
@@ -797,8 +837,10 @@ function onCatch(scene, hand) {
     score += gain;
 
     applySingleDifficulty(scene);
+    const difficulty = getSingleDifficultyConfig();
     const gravityBoost = Math.min(singleDifficultyLevel * 24, 160);
-    scene.physics.world.gravity.y = 560 + Math.min(score * 8, 220) + gravityBoost;
+    const baseGravity = 560 + Math.min(score * 8, 220) + gravityBoost;
+    scene.physics.world.gravity.y = Math.round(baseGravity * difficulty.gravityScale);
 
     scoreText.setText(`Score: ${score}`);
     updateCatchZoneSizeForScore(scene);
@@ -829,7 +871,8 @@ function onDoubleCatch(scene, hand) {
     catchCount += 1;
     score += 2;
 
-    scene.physics.world.gravity.y = 560 + Math.min(score * 8, 220);
+    const difficulty = getSingleDifficultyConfig();
+    scene.physics.world.gravity.y = Math.round((560 + Math.min(score * 8, 220)) * difficulty.gravityScale);
 
     scoreText.setText(`Score: ${score}`);
     updateCatchZoneSizeForScore(scene);
@@ -1072,6 +1115,7 @@ function startDualGame(scene, names = { mouse: 'Mouse', keyboard: 'Keyboard' }) 
     cleanupGroup('gameOverGroup');
     cleanupGroup('leaderboardGroup');
     clearPowerUp(scene, true);
+    resetPauseState(scene);
 
     gameState = 'dual';
     dualRunStartMs = scene.time.now;
@@ -1134,6 +1178,7 @@ function startDualGame(scene, names = { mouse: 'Mouse', keyboard: 'Keyboard' }) 
         stroke: '#1565c0',
         strokeThickness: 4
     }).setOrigin(0.5, 0);
+    dualPauseButton = createToggleButton(scene, GAME_WIDTH - 60, 44, 'Pause', '#6d4c41', () => togglePause(scene), 120, 20);
     const exitBtn = createButton(scene, GAME_WIDTH - 60, 92, 'Exit', '#546e7a', () => showIntro(scene), 120, 20);
     dualTimerText = dualTimerEnabled
         ? scene.add.text(GAME_WIDTH / 2, 14, `Time: ${dualTimerSeconds}s`, {
@@ -1180,6 +1225,7 @@ function startDualGame(scene, names = { mouse: 'Mouse', keyboard: 'Keyboard' }) 
         mouseTitle,
         keyboardTitle,
         seriesText,
+        dualPauseButton,
         exitBtn,
         dualPowerNoticeText
     ]);
@@ -1287,6 +1333,7 @@ function createDualLanePlayer(scene, label, accentColor, lane) {
 }
 
 function switchDualHand(scene, controlKey) {
+    if (isGamePaused) return;
     if (!dualMatch || dualMatch.ended) return;
     const player = controlKey === 'mouse' ? dualMatch.mouse : dualMatch.keyboard;
     if (!player || !player.canSwitch) return;
@@ -2075,6 +2122,8 @@ function endDualSeries(scene, winner, loser) {
 }
 
 function cleanupGame(scene) {
+    resetPauseState(scene);
+    singlePauseButton = null;
     clearDoubleHands();
     resetMovingBoxes(scene);
     if (singlePowerSpawnEvent) {
@@ -2128,6 +2177,8 @@ function cleanupGame(scene) {
 }
 
 function cleanupDualGame(scene) {
+    resetPauseState(scene);
+    dualPauseButton = null;
     if (dualPowerSpawnEvent) {
         dualPowerSpawnEvent.remove(false);
         dualPowerSpawnEvent = null;
@@ -2201,6 +2252,100 @@ function cleanupGroup(groupName) {
     if (groupName === 'dualGuestRoleGroup') dualGuestRoleGroup = null;
     if (groupName === 'gameOverGroup') gameOverGroup = null;
     if (groupName === 'leaderboardGroup') leaderboardGroup = null;
+}
+
+function togglePause(scene) {
+    if (isGamePaused) {
+        resumeGame(scene);
+        return;
+    }
+    if (gameState !== 'playing' && gameState !== 'dual') return;
+
+    isGamePaused = true;
+    pausedMode = gameState;
+    scene.physics.world.pause();
+    scene.time.timeScale = 0;
+    scene.tweens.pauseAll();
+    showPauseOverlay(scene);
+    refreshPauseButtons();
+}
+
+function resumeGame(scene) {
+    if (!isGamePaused) return;
+
+    isGamePaused = false;
+    pausedMode = null;
+    scene.time.timeScale = 1;
+    scene.physics.world.resume();
+    scene.tweens.resumeAll();
+    hidePauseOverlay();
+    refreshPauseButtons();
+}
+
+function resetPauseState(scene) {
+    isGamePaused = false;
+    pausedMode = null;
+    if (scene?.time) scene.time.timeScale = 1;
+    if (scene?.physics?.world) scene.physics.world.resume();
+    if (scene?.tweens) scene.tweens.resumeAll();
+    hidePauseOverlay();
+    refreshPauseButtons();
+}
+
+function showPauseOverlay(scene) {
+    hidePauseOverlay();
+    const title = pausedMode === 'dual' ? '2P Paused' : 'Paused';
+    pauseOverlayGroup = scene.add.group();
+    const shade = scene.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.5);
+    shade.setInteractive({ useHandCursor: false });
+    const panel = scene.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, 380, 200, 0xffffff, 0.97);
+    panel.setStrokeStyle(4, 0x5d4037, 1);
+    const heading = scene.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 48, title, {
+        fontSize: '42px',
+        fill: '#5d4037',
+        fontFamily: 'Comic Sans MS',
+        fontStyle: 'bold'
+    }).setOrigin(0.5);
+    const hint = scene.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 6, 'Press Esc or click Resume', {
+        fontSize: '20px',
+        fill: '#263238',
+        fontFamily: 'Trebuchet MS'
+    }).setOrigin(0.5);
+    pauseOverlayResumeButton = scene.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 + 54, 'Resume', {
+        fontSize: '28px',
+        fill: '#ffffff',
+        backgroundColor: '#2e7d32',
+        fontFamily: 'Trebuchet MS',
+        fontStyle: 'bold',
+        padding: { left: 24, right: 24, top: 10, bottom: 10 },
+        align: 'center'
+    }).setOrigin(0.5);
+    pauseOverlayResumeButton.setInteractive({ useHandCursor: true });
+    pauseOverlayResumeButton.on('pointerover', () => pauseOverlayResumeButton.setScale(1.05));
+    pauseOverlayResumeButton.on('pointerout', () => pauseOverlayResumeButton.setScale(1));
+    pauseOverlayResumeButton.on('pointerdown', () => resumeGame(scene));
+
+    pauseOverlayGroup.addMultiple([shade, panel, heading, hint, pauseOverlayResumeButton]);
+    if (pausedMode === 'playing' && gameplayGroup) {
+        gameplayGroup.addMultiple([shade, panel, heading, hint, pauseOverlayResumeButton]);
+    } else if (pausedMode === 'dual' && dualGroup) {
+        dualGroup.addMultiple([shade, panel, heading, hint, pauseOverlayResumeButton]);
+    }
+}
+
+function hidePauseOverlay() {
+    if (pauseOverlayGroup) {
+        pauseOverlayGroup.destroy(true);
+        pauseOverlayGroup = null;
+    }
+    pauseOverlayResumeButton = null;
+}
+
+function refreshPauseButtons() {
+    const singleText = isGamePaused && pausedMode === 'playing' ? 'Resume' : 'Pause';
+    const dualText = isGamePaused && pausedMode === 'dual' ? 'Resume' : 'Pause';
+    if (singlePauseButton?.active) singlePauseButton.setText(singleText);
+    if (dualPauseButton?.active) dualPauseButton.setText(dualText);
 }
 
 function createButton(scene, x, y, label, bgColor, onClick, width = 240, fontSize = 28) {
@@ -2290,6 +2435,13 @@ function cycleSingleTimerSeconds(buttonText) {
     if (buttonText) buttonText.setText(`1P: ${singleTimerSeconds}s`);
 }
 
+function cycleSingleDifficulty(buttonText) {
+    const idx = SINGLE_DIFFICULTY_OPTIONS.indexOf(singleDifficultyMode);
+    singleDifficultyMode = SINGLE_DIFFICULTY_OPTIONS[(idx + 1) % SINGLE_DIFFICULTY_OPTIONS.length];
+    localStorage.setItem('tabandatato_difficulty', singleDifficultyMode);
+    if (buttonText) buttonText.setText(`1P Difficulty: ${singleDifficultyMode}`);
+}
+
 function cycleDualTimerSeconds(buttonText) {
     const idx = TIMER_OPTIONS.indexOf(dualTimerSeconds);
     dualTimerSeconds = TIMER_OPTIONS[(idx + 1) % TIMER_OPTIONS.length];
@@ -2299,6 +2451,50 @@ function cycleDualTimerSeconds(buttonText) {
 
 function clampTimerSeconds(value) {
     return TIMER_OPTIONS.includes(value) ? value : 30;
+}
+
+function clampSingleDifficulty(value) {
+    return SINGLE_DIFFICULTY_OPTIONS.includes(value) ? value : 'Medium';
+}
+
+function getSingleDifficultyConfig() {
+    if (singleDifficultyMode === 'Easy') {
+        return {
+            scoreStep: 14,
+            boxMoveTrigger: 14,
+            obstacleTrigger: 34,
+            obstacleScoreStep: 7,
+            shrinkScale: 0.82,
+            timeShrinkScale: 0.85,
+            gravityScale: 0.88,
+            obstacleSpawnDelayScale: 1.25,
+            obstacleSpeedScale: 0.86
+        };
+    }
+    if (singleDifficultyMode === 'Very Hard') {
+        return {
+            scoreStep: 7,
+            boxMoveTrigger: 6,
+            obstacleTrigger: 14,
+            obstacleScoreStep: 4,
+            shrinkScale: 1.3,
+            timeShrinkScale: 1.35,
+            gravityScale: 1.18,
+            obstacleSpawnDelayScale: 0.74,
+            obstacleSpeedScale: 1.25
+        };
+    }
+    return {
+        scoreStep: DIFFICULTY_SCORE_STEP,
+        boxMoveTrigger: BOX_MOVE_SCORE_TRIGGER,
+        obstacleTrigger: SINGLE_OBSTACLE_SCORE_TRIGGER,
+        obstacleScoreStep: SINGLE_OBSTACLE_SCORE_STEP,
+        shrinkScale: 1,
+        timeShrinkScale: 1,
+        gravityScale: 1,
+        obstacleSpawnDelayScale: 1,
+        obstacleSpeedScale: 1
+    };
 }
 
 function finishDualRoundByTimer(scene) {
@@ -2379,14 +2575,15 @@ function popHand(hand, scene) {
 
 function updateCatchZoneSizeForScore(scene) {
     if (!leftCatchZone || !rightCatchZone) return;
+    const difficulty = getSingleDifficultyConfig();
 
-    const widthShrink = score * (CATCH_SHRINK_PER_SCORE + score * 0.03);
-    const heightShrink = score * (0.9 + score * 0.01);
-    const levelWidthShrink = singleDifficultyLevel * 6;
-    const levelHeightShrink = singleDifficultyLevel * 1.2;
+    const widthShrink = score * (CATCH_SHRINK_PER_SCORE + score * 0.03) * difficulty.shrinkScale;
+    const heightShrink = score * (0.9 + score * 0.01) * difficulty.shrinkScale;
+    const levelWidthShrink = singleDifficultyLevel * 6 * difficulty.shrinkScale;
+    const levelHeightShrink = singleDifficultyLevel * 1.2 * difficulty.shrinkScale;
     const elapsedSec = Math.max(0, ((scene?.time.now ?? 0) - runStartMs) / 1000);
-    const timeWidthShrink = elapsedSec * CATCH_SHRINK_PER_SECOND;
-    const timeHeightShrink = elapsedSec * 0.62;
+    const timeWidthShrink = elapsedSec * CATCH_SHRINK_PER_SECOND * difficulty.timeShrinkScale;
+    const timeHeightShrink = elapsedSec * 0.62 * difficulty.timeShrinkScale;
     const bonus = activePowerUp && activePowerUp.type === 'bigbox' ? 1.35 : 1;
     const nextWidth = Math.max(
         MIN_CATCH_WIDTH,
@@ -2485,8 +2682,9 @@ function clearDoubleHands() {
 }
 
 function getSingleDifficultyLevel(currentScore) {
-    if (currentScore < BOX_MOVE_SCORE_TRIGGER) return 0;
-    return Math.floor((currentScore - BOX_MOVE_SCORE_TRIGGER) / DIFFICULTY_SCORE_STEP) + 1;
+    const difficulty = getSingleDifficultyConfig();
+    if (currentScore < difficulty.boxMoveTrigger) return 0;
+    return Math.floor((currentScore - difficulty.boxMoveTrigger) / difficulty.scoreStep) + 1;
 }
 
 function applySingleDifficulty(scene) {
@@ -2505,7 +2703,8 @@ function getBoxMoveSettings() {
 }
 
 function refreshBoxMoveEvent(scene) {
-    if (score < BOX_MOVE_SCORE_TRIGGER) return;
+    const difficulty = getSingleDifficultyConfig();
+    if (score < difficulty.boxMoveTrigger) return;
     if (boxMoveEvent) {
         boxMoveEvent.remove(false);
         boxMoveEvent = null;
@@ -2531,7 +2730,8 @@ function refreshBoxMoveEvent(scene) {
 }
 
 function maybeEnableMovingBoxes(scene) {
-    if (score < BOX_MOVE_SCORE_TRIGGER || boxMoveEvent) return;
+    const difficulty = getSingleDifficultyConfig();
+    if (score < difficulty.boxMoveTrigger || boxMoveEvent) return;
     refreshBoxMoveEvent(scene);
 }
 
@@ -2564,7 +2764,8 @@ function scheduleNextSinglePowerUp(scene) {
 }
 
 function maybeEnableSingleObstacles(scene) {
-    if (gameState !== 'playing' || score < SINGLE_OBSTACLE_SCORE_TRIGGER) return;
+    const difficulty = getSingleDifficultyConfig();
+    if (gameState !== 'playing' || score < difficulty.obstacleTrigger) return;
     if (!singleObstacleGroup || singleObstacleSpawnEvent) return;
     scheduleNextSingleObstacle(scene);
 }
@@ -2576,8 +2777,9 @@ function scheduleNextSingleObstacle(scene) {
         singleObstacleSpawnEvent = null;
     }
     const level = getSingleObstacleLevel();
-    const minDelay = Math.max(420, 1500 - level * 120);
-    const maxDelay = Math.max(700, 2200 - level * 140);
+    const difficulty = getSingleDifficultyConfig();
+    const minDelay = Math.max(420, Math.round((1500 - level * 120) * difficulty.obstacleSpawnDelayScale));
+    const maxDelay = Math.max(700, Math.round((2200 - level * 140) * difficulty.obstacleSpawnDelayScale));
     singleObstacleSpawnEvent = scene.time.delayedCall(Phaser.Math.Between(minDelay, maxDelay), () => {
         spawnSingleObstacleWave(scene);
         scheduleNextSingleObstacle(scene);
@@ -2585,8 +2787,9 @@ function scheduleNextSingleObstacle(scene) {
 }
 
 function getSingleObstacleLevel() {
-    if (score < SINGLE_OBSTACLE_SCORE_TRIGGER) return 0;
-    return Math.floor((score - SINGLE_OBSTACLE_SCORE_TRIGGER) / SINGLE_OBSTACLE_SCORE_STEP) + 1;
+    const difficulty = getSingleDifficultyConfig();
+    if (score < difficulty.obstacleTrigger) return 0;
+    return Math.floor((score - difficulty.obstacleTrigger) / difficulty.obstacleScoreStep) + 1;
 }
 
 function getSingleObstacleWaveCount() {
@@ -2606,8 +2809,9 @@ function spawnSingleObstacle(scene) {
     const item = scene.add.image(Phaser.Math.Between(26, GAME_WIDTH - 26), -24, 'single_obstacle');
     const size = Phaser.Math.Between(24, 40);
     const level = getSingleObstacleLevel();
+    const difficulty = getSingleDifficultyConfig();
     item.setDisplaySize(size, size);
-    item.setData('fallSpeed', Phaser.Math.Between(185, 250) + Math.min(140, level * 16));
+    item.setData('fallSpeed', (Phaser.Math.Between(185, 250) + Math.min(140, level * 16)) * difficulty.obstacleSpeedScale);
     item.setData('driftX', Phaser.Math.Between(-70, 70));
     item.setData('spin', Phaser.Math.FloatBetween(-2.6, 2.6));
     item.setData('spawnMs', scene.time.now);
@@ -2701,7 +2905,14 @@ function updateSinglePowerUps(scene, delta) {
 function pickSinglePowerType() {
     const roll = Phaser.Math.FloatBetween(0, 1);
     const level = getSingleDifficultyLevel(score);
-    const boostChance = score >= BOX_MOVE_SCORE_TRIGGER ? Math.max(0.32, 0.62 - level * 0.05) : 0.68;
+    const difficulty = getSingleDifficultyConfig();
+    const trigger = difficulty.boxMoveTrigger;
+    const baseBoostChance = score >= trigger ? Math.max(0.32, 0.62 - level * 0.05) : 0.68;
+    const boostChance = singleDifficultyMode === 'Easy'
+        ? Math.min(0.82, baseBoostChance + 0.12)
+        : singleDifficultyMode === 'Very Hard'
+            ? Math.max(0.2, baseBoostChance - 0.12)
+            : baseBoostChance;
     let type;
     if (roll < boostChance) {
         const boosts = [
