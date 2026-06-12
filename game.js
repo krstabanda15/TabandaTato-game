@@ -194,6 +194,7 @@ let maxStreak = 0;
 let powerUpsCollected = 0;
 let hasNewHighScoreThisRun = false;
 let supabaseClient = null;
+let supabaseRealtimeChannel = null;
 let cloudLeaderboard = [];
 let cloudDualLeaderboard = [];
 let cloudScoresLoaded = false;
@@ -734,6 +735,9 @@ function setLoggedInPlayer(name) {
     selectedPlayer = loggedInPlayer;
     localStorage.setItem('tabandatato_logged_in_player', loggedInPlayer);
     selectedPotatoSkin = clampPotatoSkin(localStorage.getItem(getSkinStorageKey(loggedInPlayer)));
+    if (!getUnlockedSkinsForPlayer(loggedInPlayer).includes(selectedPotatoSkin)) {
+        selectedPotatoSkin = 'Classic';
+    }
 }
 
 function getSavedLoginPlayer() {
@@ -1333,7 +1337,6 @@ function finishGame(scene) {
     }
 
     const dailyWon = dailyChallengeActive && score >= getDailyChallengeConfig().targetScore;
-    saveLeaderboardEntry(selectedPlayer, score);
     const profileResult = updatePlayerProfile(selectedPlayer, {
         score,
         catches: catchCount,
@@ -1352,6 +1355,7 @@ function finishGame(scene) {
         wonDaily: dailyWon
     });
     const skinUnlock = updateSkinUnlocks(score, maxStreak, dailyWon);
+    saveLeaderboardEntry(selectedPlayer, score, profileResult.profile);
     if (dailyChallengeActive) saveDailyChallengeScore(score);
     const leaderboard = getLeaderboard();
     bestScore = leaderboard.length > 0 ? leaderboard[0].score : bestScore;
@@ -2545,8 +2549,7 @@ function updateDualSeriesHud() {
 function endDualSeries(scene, winner, loser) {
     if (!dualMatch) return;
     const currentNames = { mouse: dualMatch.mouse.label, keyboard: dualMatch.keyboard.label };
-    saveDualLeaderboardEntry(winner.label, loser.label, winner.totalScore, loser.totalScore);
-    updatePlayerProfile(winner.label, {
+    const winnerProfile = updatePlayerProfile(winner.label, {
         score: winner.totalScore,
         catches: winner.totalScore,
         maxStreak: 0,
@@ -2554,8 +2557,8 @@ function endDualSeries(scene, winner, loser) {
         games: 1,
         wins: 1,
         losses: 0
-    });
-    updatePlayerProfile(loser.label, {
+    }).profile;
+    const loserProfile = updatePlayerProfile(loser.label, {
         score: loser.totalScore,
         catches: loser.totalScore,
         maxStreak: 0,
@@ -2563,7 +2566,8 @@ function endDualSeries(scene, winner, loser) {
         games: 1,
         wins: 0,
         losses: 1
-    });
+    }).profile;
+    saveDualLeaderboardEntry(winner.label, loser.label, winner.totalScore, loser.totalScore, winnerProfile, loserProfile);
     const dualTop = getDualLeaderboard().slice(0, 3);
 
     if (dualResultGroup) {
@@ -3794,7 +3798,12 @@ function getUnlockedSkins() {
 }
 
 function getUnlockedSkinsForPlayer(player) {
+    if (isDaddyPlayer(player)) return [...POTATO_SKINS];
     try {
+        const cloudProfile = cloudProfiles.find((profile) => getPlayerKey(profile.player) === getPlayerKey(player));
+        if (cloudProfile?.unlockedSkins?.length) {
+            return Array.from(new Set(['Classic', ...cloudProfile.unlockedSkins])).filter((skin) => POTATO_SKINS.includes(skin));
+        }
         const raw = localStorage.getItem(getSkinStorageKey(player));
         const parsed = raw ? JSON.parse(raw) : ['Classic'];
         return Array.from(new Set(['Classic', ...parsed])).filter((skin) => POTATO_SKINS.includes(skin));
@@ -3804,11 +3813,18 @@ function getUnlockedSkinsForPlayer(player) {
 }
 
 function saveUnlockedSkins(skins) {
-    localStorage.setItem(getSkinStorageKey(selectedPlayer), JSON.stringify(Array.from(new Set(['Classic', ...skins]))));
+    const unlockedSkins = isDaddyPlayer(selectedPlayer)
+        ? [...POTATO_SKINS]
+        : Array.from(new Set(['Classic', ...skins])).filter((skin) => POTATO_SKINS.includes(skin));
+    localStorage.setItem(getSkinStorageKey(selectedPlayer), JSON.stringify(unlockedSkins));
 }
 
 function getSkinStorageKey(player) {
     return `tabandatato_unlocked_skins_${getPlayerKey(player)}`;
+}
+
+function isDaddyPlayer(player) {
+    return getPlayerKey(player) === 'daddy';
 }
 
 function updateSkinUnlocks(finalScore, finalStreak, wonDaily) {
@@ -3825,8 +3841,14 @@ function updateSkinUnlocks(finalScore, finalStreak, wonDaily) {
     if (finalScore >= 75 || wonDaily) add('Golden');
     if (getPlayerProfile(selectedPlayer).level >= 5) add('Fire');
     if (getPlayerProfile(selectedPlayer).level >= 8) add('Ninja');
-    if (getPlayerProfile(selectedPlayer).level >= 5) add('Golden');
+    if (getPlayerProfile(selectedPlayer).level >= 12) add('Golden');
     saveUnlockedSkins(next);
+    saveSupabaseProfile({
+        ...getPlayerProfile(selectedPlayer),
+        player: selectedPlayer || 'Guest',
+        unlockedSkins: getUnlockedSkinsForPlayer(selectedPlayer),
+        favoriteSkin: selectedPotatoSkin
+    });
     return newly;
 }
 
@@ -3866,12 +3888,18 @@ function getPlayerProfile(player) {
     const key = getPlayerKey(player);
     const local = getAllProfiles()[key];
     const cloud = cloudProfiles.find((profile) => getPlayerKey(profile.player) === key);
+    if (cloud && local) {
+        const localProfile = normalizeProfile(local);
+        const cloudProfile = normalizeProfile(cloud);
+        return cloudProfile.xp >= localProfile.xp ? cloudProfile : localProfile;
+    }
     return normalizeProfile(cloud || local || { player: player || 'Guest' });
 }
 
 function normalizeProfile(profile) {
     const xp = Number(profile.xp) || 0;
-    const level = getLevelFromXp(xp);
+    const level = Math.max(Number(profile.level) || 0, getLevelFromXp(xp));
+    const unlockedSkins = normalizeUnlockedSkins(profile.unlockedSkins ?? profile.unlocked_skins, profile.player);
     return {
         player: String(profile.player || 'Guest').slice(0, 40),
         xp,
@@ -3884,17 +3912,25 @@ function normalizeProfile(profile) {
         powerUps: Number(profile.powerUps ?? profile.powerups) || 0,
         wins: Number(profile.wins) || 0,
         losses: Number(profile.losses) || 0,
-        favoriteSkin: profile.favoriteSkin ?? profile.favorite_skin ?? 'Classic'
+        favoriteSkin: clampPotatoSkin(profile.favoriteSkin ?? profile.favorite_skin ?? 'Classic'),
+        unlockedSkins
     };
+}
+
+function normalizeUnlockedSkins(skins, player) {
+    if (isDaddyPlayer(player)) return [...POTATO_SKINS];
+    const values = Array.isArray(skins) ? skins : [];
+    return Array.from(new Set(['Classic', ...values])).filter((skin) => POTATO_SKINS.includes(skin));
 }
 
 function updatePlayerProfile(player, stats) {
     const profiles = getAllProfiles();
     const key = getPlayerKey(player);
-    const current = normalizeProfile(profiles[key] || { player });
+    const current = getPlayerProfile(player);
     const xpGain = calculateXpGain(stats);
     const updated = normalizeProfile({
         ...current,
+        player,
         xp: current.xp + xpGain,
         games: current.games + (stats.games || 0),
         totalCatches: current.totalCatches + (stats.catches || 0),
@@ -3903,7 +3939,8 @@ function updatePlayerProfile(player, stats) {
         powerUps: current.powerUps + (stats.powerUps || 0),
         wins: current.wins + (stats.wins || 0),
         losses: current.losses + (stats.losses || 0),
-        favoriteSkin: selectedPotatoSkin
+        favoriteSkin: selectedPotatoSkin,
+        unlockedSkins: getUnlockedSkinsForPlayer(player)
     });
     profiles[key] = updated;
     saveAllProfiles(profiles);
@@ -4204,11 +4241,13 @@ function getLocalLeaderboard() {
     }
 }
 
-function saveLeaderboardEntry(player, playerScore) {
+function saveLeaderboardEntry(player, playerScore, profile = null) {
+    const normalizedProfile = profile ? normalizeProfile(profile) : getPlayerProfile(player);
     const leaderboard = getLocalLeaderboard();
     leaderboard.push({
         player: player || 'Guest',
         score: Number(playerScore) || 0,
+        level: normalizedProfile.level,
         date: Date.now(),
         difficulty: singleDifficultyMode,
         rule: singleRuleMode,
@@ -4221,6 +4260,7 @@ function saveLeaderboardEntry(player, playerScore) {
     saveSupabaseScore({
         player: player || 'Guest',
         score: Number(playerScore) || 0,
+        level: normalizedProfile.level,
         difficulty: singleDifficultyMode,
         rule_mode: singleRuleMode,
         daily: dailyChallengeActive,
@@ -4256,13 +4296,17 @@ function getLocalDualLeaderboard() {
     }
 }
 
-function saveDualLeaderboardEntry(winner, loser, winnerScore, loserScore) {
+function saveDualLeaderboardEntry(winner, loser, winnerScore, loserScore, winnerProfile = null, loserProfile = null) {
+    const normalizedWinnerProfile = winnerProfile ? normalizeProfile(winnerProfile) : getPlayerProfile(winner);
+    const normalizedLoserProfile = loserProfile ? normalizeProfile(loserProfile) : getPlayerProfile(loser);
     const leaderboard = getLocalDualLeaderboard();
     leaderboard.push({
         winner: winner || 'Unknown',
         loser: loser || 'Unknown',
         winnerScore: Number(winnerScore) || 0,
         loserScore: Number(loserScore) || 0,
+        winnerLevel: normalizedWinnerProfile.level,
+        loserLevel: normalizedLoserProfile.level,
         date: Date.now(),
         variant: selectedDualVariant
     });
@@ -4273,6 +4317,8 @@ function saveDualLeaderboardEntry(winner, loser, winnerScore, loserScore) {
         loser: loser || 'Unknown',
         winner_score: Number(winnerScore) || 0,
         loser_score: Number(loserScore) || 0,
+        winner_level: normalizedWinnerProfile.level,
+        loser_level: normalizedLoserProfile.level,
         variant: selectedDualVariant
     });
 }
@@ -4291,8 +4337,19 @@ function initSupabase() {
     if (!isSupabaseEnabled()) return null;
     if (!supabaseClient) {
         supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        subscribeToSupabaseRealtime();
     }
     return supabaseClient;
+}
+
+function subscribeToSupabaseRealtime() {
+    if (!supabaseClient || supabaseRealtimeChannel) return;
+    supabaseRealtimeChannel = supabaseClient
+        .channel('tabandatato-sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_SINGLE_TABLE }, () => refreshCloudLeaderboards())
+        .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_DUAL_TABLE }, () => refreshCloudLeaderboards())
+        .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_PROFILE_TABLE }, () => refreshCloudLeaderboards())
+        .subscribe();
 }
 
 async function refreshCloudLeaderboards() {
@@ -4302,12 +4359,12 @@ async function refreshCloudLeaderboards() {
         const [singleResult, dualResult] = await Promise.all([
             client
                 .from(SUPABASE_SINGLE_TABLE)
-                .select('player, score, created_at, difficulty, rule_mode, daily, skin, catches, max_streak, powerups, session_id')
+                .select('player, score, level, created_at, difficulty, rule_mode, daily, skin, catches, max_streak, powerups, session_id')
                 .order('score', { ascending: false })
                 .limit(50),
             client
                 .from(SUPABASE_DUAL_TABLE)
-                .select('winner, loser, winner_score, loser_score, created_at, variant, session_id')
+                .select('winner, loser, winner_score, loser_score, winner_level, loser_level, created_at, variant, session_id')
                 .order('winner_score', { ascending: false })
                 .order('loser_score', { ascending: false })
                 .limit(50)
@@ -4316,6 +4373,7 @@ async function refreshCloudLeaderboards() {
             cloudLeaderboard = singleResult.data.map((entry) => ({
                 player: entry.player || 'Guest',
                 score: Number(entry.score) || 0,
+                level: Number(entry.level) || getLevelFromXp(0),
                 date: entry.created_at ? Date.parse(entry.created_at) : Date.now(),
                 difficulty: entry.difficulty,
                 rule: entry.rule_mode,
@@ -4333,6 +4391,8 @@ async function refreshCloudLeaderboards() {
                 loser: entry.loser || 'Unknown',
                 winnerScore: Number(entry.winner_score) || 0,
                 loserScore: Number(entry.loser_score) || 0,
+                winnerLevel: Number(entry.winner_level) || getLevelFromXp(0),
+                loserLevel: Number(entry.loser_level) || getLevelFromXp(0),
                 date: entry.created_at ? Date.parse(entry.created_at) : Date.now(),
                 variant: entry.variant,
                 source: 'cloud'
@@ -4340,7 +4400,7 @@ async function refreshCloudLeaderboards() {
         }
         const profileResult = await client
             .from(SUPABASE_PROFILE_TABLE)
-            .select('player, xp, games, total_catches, best_score, best_streak, powerups, wins, losses, favorite_skin, updated_at')
+            .select('player, xp, level, games, total_catches, best_score, best_streak, powerups, wins, losses, favorite_skin, unlocked_skins, updated_at')
             .order('xp', { ascending: false })
             .limit(50);
         if (!profileResult.error && Array.isArray(profileResult.data)) {
@@ -4390,6 +4450,7 @@ function sanitizeSingleScore(entry) {
         ...entry,
         player: String(entry.player || 'Guest').slice(0, 40),
         score: scoreValue,
+        level: Math.max(1, Math.min(999, Number(entry.level) || getPlayerProfile(entry.player).level)),
         catches: catchesValue,
         max_streak: Math.max(0, Math.min(100000, Number(entry.max_streak) || 0)),
         powerups: Math.max(0, Math.min(100000, Number(entry.powerups) || 0)),
@@ -4407,6 +4468,8 @@ function sanitizeDualScore(entry) {
         loser: String(entry.loser || 'Unknown').slice(0, 40),
         winner_score: winnerScore,
         loser_score: loserScore,
+        winner_level: Math.max(1, Math.min(999, Number(entry.winner_level) || getPlayerProfile(entry.winner).level)),
+        loser_level: Math.max(1, Math.min(999, Number(entry.loser_level) || getPlayerProfile(entry.loser).level)),
         session_id: sessionId
     };
 }
@@ -4417,6 +4480,7 @@ function sanitizeProfile(profile) {
         player_key: getPlayerKey(normalized.player),
         player: normalized.player,
         xp: Math.max(0, Math.min(9999999, normalized.xp)),
+        level: Math.max(1, Math.min(999, normalized.level)),
         games: Math.max(0, Math.min(999999, normalized.games)),
         total_catches: Math.max(0, Math.min(9999999, normalized.totalCatches)),
         best_score: Math.max(0, Math.min(100000, normalized.bestScore)),
@@ -4425,6 +4489,7 @@ function sanitizeProfile(profile) {
         wins: Math.max(0, Math.min(999999, normalized.wins)),
         losses: Math.max(0, Math.min(999999, normalized.losses)),
         favorite_skin: normalized.favoriteSkin,
+        unlocked_skins: normalizeUnlockedSkins(normalized.unlockedSkins, normalized.player),
         updated_at: new Date().toISOString()
     };
 }
