@@ -3825,7 +3825,7 @@ function updateSkinUnlocks(finalScore, finalStreak, wonDaily) {
     if (finalScore >= 75 || wonDaily) add('Golden');
     if (getPlayerProfile(selectedPlayer).level >= 5) add('Fire');
     if (getPlayerProfile(selectedPlayer).level >= 8) add('Ninja');
-    if (getPlayerProfile(selectedPlayer).level >= 12) add('Golden');
+    if (getPlayerProfile(selectedPlayer).level >= 5) add('Golden');
     saveUnlockedSkins(next);
     return newly;
 }
